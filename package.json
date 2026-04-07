@@ -1,0 +1,45 @@
+{
+  "name": "cib7-mcp",
+  "version": "0.1.0",
+  "description": "MCP tool for investigating CIB Seven process instances — gives Claude comprehensive knowledge of CIB Seven REST APIs with live execution and Keycloak auth",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "cib7-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "cibseven",
+    "camunda",
+    "bpmn",
+    "process-engine",
+    "claude",
+    "ai"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "fast-xml-parser": "^5.2.3",
+    "openid-client": "^6.4.3",
+    "zod": "^3.25.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "eslint": "^9.27.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}
