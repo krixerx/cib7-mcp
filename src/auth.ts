@@ -26,7 +26,7 @@ import type { AuthConfig } from "./types.js";
 export async function performBrowserLogin(
   authConfig: AuthConfig,
   tokenManager: TokenManager,
-): Promise<{ userEmail: string | null; expiresInMinutes: number }> {
+): Promise<{ userEmail: string | null; expiresInMinutes: number; authorizationUrl: string }> {
   const issuerUrl = new URL(`/realms/${authConfig.realm}`, authConfig.keycloakUrl);
 
   // Step 1: OIDC discovery (public client, no secret)
@@ -55,8 +55,8 @@ export async function performBrowserLogin(
   const callbackServer = new CallbackServer();
   const callbackPromise = callbackServer.start(state);
 
-  // Wait a tick for the server to be listening before reading the port
-  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  // Wait for the server to be listening before reading the port
+  await callbackServer.listening;
 
   const redirectUri = callbackServer.redirectUri;
 
@@ -68,8 +68,10 @@ export async function performBrowserLogin(
     state,
   });
 
+  const authorizationUrl = authUrl.href;
+
   // Step 4: Open browser
-  openBrowser(authUrl.href);
+  openBrowser(authorizationUrl);
 
   try {
     // Step 5: Wait for callback with auth code
@@ -113,6 +115,7 @@ export async function performBrowserLogin(
     return {
       userEmail: tokenManager.userEmail,
       expiresInMinutes: tokenManager.expiresInMinutes,
+      authorizationUrl,
     };
   } catch (err) {
     callbackServer.stop();

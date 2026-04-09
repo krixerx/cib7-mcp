@@ -77,28 +77,48 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
 }
 
 /**
- * Check if the package was installed via npm (globally or via npx).
+ * Check if running via npx (temporary cached install).
  */
-function isNpmInstall(): boolean {
+function isNpxInstall(): boolean {
+  // npx stores packages in a cache directory containing '_npx'
   const projectRoot = getProjectRoot();
-  // npm installs have node_modules/.package-lock.json or live inside a global node_modules
-  // A git clone has .git; an npm install does not and typically lacks src/
-  return !isGitRepo() && !existsSync(resolve(projectRoot, "src"));
+  return projectRoot.includes("_npx");
+}
+
+/**
+ * Check if the package was installed globally via npm.
+ */
+function isNpmGlobalInstall(): boolean {
+  const projectRoot = getProjectRoot();
+  // Not a git clone, not npx, and no src/ directory (npm only publishes dist/)
+  return !isGitRepo() && !isNpxInstall() && !existsSync(resolve(projectRoot, "src"));
 }
 
 /**
  * Perform the update. Detects the installation method and uses the
  * appropriate strategy:
+ * - npx: no self-update needed, npx fetches latest on each run
+ * - npm global install: npm install -g cib7-mcp@latest
  * - Git clone: git pull + npm install + npm run build
- * - npm global install: npm update -g cib7-mcp
  * Returns result with instructions to restart.
  */
 export async function performUpdate(): Promise<UpdateResult> {
   const projectRoot = getProjectRoot();
   const previousVersion = getLocalVersion();
 
-  if (isNpmInstall()) {
-    // npm-installed: use npm to update
+  if (isNpxInstall()) {
+    return {
+      success: false,
+      previousVersion,
+      newVersion: previousVersion,
+      message:
+        "This server was started via npx, which automatically fetches the latest version on each run. " +
+        "To update, simply restart the MCP server — npx will pull the latest version. " +
+        "To clear the npx cache and force a fresh download, run: npx clear-npx-cache",
+    };
+  }
+
+  if (isNpmGlobalInstall()) {
     try {
       console.error("[updater] Updating via npm...");
       execSync("npm install -g cib7-mcp@latest", { stdio: "pipe", timeout: 120000 });

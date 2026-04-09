@@ -129,6 +129,8 @@ export function createServer(
 - If a JWT token is provided, it is used directly (no browser login needed).
 - Otherwise, opens the default browser to the Keycloak login page for PKCE authentication.
 
+The response includes the authorizationUrl. If the browser cannot open automatically (headless/remote environments), share this URL with the user so they can complete login manually.
+
 Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
     {
       token: z.string().optional().describe("A pre-obtained JWT access token. When provided, the token is used directly and the browser login flow is skipped."),
@@ -160,6 +162,7 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
           userEmail: result.userEmail,
           sessionExpiresInMinutes: result.expiresInMinutes,
           roles: tokenManager.roles,
+          authorizationUrl: result.authorizationUrl,
         });
       } catch (err) {
         return toolError(
@@ -371,9 +374,9 @@ Always ask the user for confirmation before calling this tool.`,
 
   server.tool(
     "get_process_instance",
-    `Look up a CIB Seven process instance by its ID. Returns the instance's definition reference, business key, and status flags.
+    `Look up a running CIB Seven process instance by its ID. Returns the instance's definition reference, business key, and status flags.
 
-Use this when you have a specific process instance ID and need to check whether it is still running. If you only have a business key or definition key, use list_process_instances instead. For richer details like state, start time, and duration, use list_process_instances which queries the history API.
+**Important:** This queries the runtime database, so it only finds instances that are still active or suspended. Completed or terminated instances return "not found" — use list_process_instances (which queries the history API) to look up finished instances.
 
 Key response fields:
 - suspended: true means manually paused by an operator
@@ -388,7 +391,7 @@ Key response fields:
         return toolResult(result);
       } catch (err) {
         if (err instanceof NotFoundError) {
-          return toolResult(`Process instance ${processInstanceId} not found. Verify the ID is correct and the instance hasn't been deleted from history.`);
+          return toolResult(`Process instance ${processInstanceId} not found in the runtime database. It may have already completed or been terminated. Use list_process_instances to check the history.`);
         }
         return toolError(err instanceof Error ? err.message : String(err));
       }

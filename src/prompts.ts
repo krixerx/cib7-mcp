@@ -5,8 +5,10 @@ Follow these steps in order, calling each tool and analyzing the results before 
 
 1. **Get process instance details**
    Call \`get_process_instance\` with processInstanceId="${processInstanceId}"
-   - Check the \`ended\` flag: if true, the process already completed or was cancelled — report that it is not stuck
-   - Check the \`suspended\` flag: if true, the process was manually paused by an operator
+   - If the response says "not found", the instance has already completed or been deleted from the runtime.
+     Call \`list_process_instances\` with processInstanceId="${processInstanceId}" to check the history API instead.
+     If the history shows state COMPLETED or EXTERNALLY_TERMINATED, report that the process is not stuck — it already finished.
+   - If found: check the \`ended\` flag (true = completed/cancelled) and \`suspended\` flag (true = manually paused by an operator)
    - Note the \`definitionId\` for later use with \`get_process_definition_xml\`
    - Note the \`businessKey\` for context
 

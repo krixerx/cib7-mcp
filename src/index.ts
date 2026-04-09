@@ -2,7 +2,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseAuthConfig, getInstanceId } from "./auth.js";
-import { getRefreshContext } from "./auth-store.js";
+import { getRefreshContext, storeRefreshContext } from "./auth-store.js";
 import { createCib7Client } from "./cib7-client.js";
 import { createRedactor } from "./redaction.js";
 import { createServer, type RuntimeConfig } from "./server.js";
@@ -54,6 +54,14 @@ async function main() {
 
   // Token manager (handles in-memory tokens + auto-refresh)
   const tokenManager = new TokenManager(authConfig);
+
+  // Persist rotated refresh tokens to disk after automatic refresh
+  tokenManager.onTokenRefresh = (ctx) => {
+    const instId = runtimeConfig.authConfig ? getInstanceId(runtimeConfig.authConfig) : null;
+    if (instId) {
+      storeRefreshContext(instId, ctx, runtimeConfig.authConfig!.keycloakUrl, runtimeConfig.authConfig!.realm);
+    }
+  };
 
   // Static token from environment — bypasses Keycloak entirely
   const staticToken = process.env.CIB7_TOKEN;

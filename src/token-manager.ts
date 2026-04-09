@@ -21,9 +21,18 @@ export class TokenManager {
   private _roles: string[] = [];
   private oidcConfig: client.Configuration | null = null;
   private authConfig: AuthConfig | null = null;
+  private _onTokenRefresh: ((ctx: RefreshContext) => void) | null = null;
 
   constructor(authConfig: AuthConfig | null) {
     this.authConfig = authConfig;
+  }
+
+  /**
+   * Register a callback to be invoked whenever tokens are refreshed.
+   * Used to persist rotated refresh tokens to disk.
+   */
+  set onTokenRefresh(cb: ((ctx: RefreshContext) => void) | null) {
+    this._onTokenRefresh = cb;
   }
 
   /**
@@ -187,6 +196,12 @@ export class TokenManager {
         tokenSet.refresh_token ?? this.refreshToken,
         tokenSet.expires_in ?? 300,
       );
+
+      // Persist rotated refresh token to disk
+      const ctx = this.refreshContext;
+      if (ctx && this._onTokenRefresh) {
+        this._onTokenRefresh(ctx);
+      }
     } catch {
       this.clearTokens();
       throw new Error("Session expired. Please call auth_login again.");

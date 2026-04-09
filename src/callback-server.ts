@@ -19,6 +19,8 @@ interface CallbackResult {
 export class CallbackServer {
   private server: http.Server | null = null;
   private _port = 0;
+  private _listeningPromise: Promise<void> | null = null;
+  private _resolveListening: (() => void) | null = null;
 
   get port(): number {
     return this._port;
@@ -29,10 +31,21 @@ export class CallbackServer {
   }
 
   /**
+   * Resolves once the server is listening and the port is assigned.
+   */
+  get listening(): Promise<void> {
+    return this._listeningPromise ?? Promise.reject(new Error("Server not started"));
+  }
+
+  /**
    * Start the server and wait for the OAuth callback.
    * Returns a Promise that resolves with the authorization code.
    */
   start(expectedState: string): Promise<CallbackResult> {
+    this._listeningPromise = new Promise<void>((resolve) => {
+      this._resolveListening = resolve;
+    });
+
     return new Promise<CallbackResult>((resolve, reject) => {
       const server = http.createServer((req, res) => {
         if (!req.url) {
@@ -100,6 +113,7 @@ export class CallbackServer {
           this._port = addr.port;
         }
         this.server = server;
+        this._resolveListening?.();
       });
 
       server.on("error", (err) => {
