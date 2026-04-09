@@ -8,6 +8,7 @@ import { deleteInstance, getRefreshContext, storeRefreshContext } from "./auth-s
 import { ensureAuthenticated } from "./permissions.js";
 import type { TokenManager } from "./token-manager.js";
 import type { AuthConfig, UserSession } from "./types.js";
+import { checkForUpdates, performUpdate, type UpdateCheckResult } from "./updater.js";
 
 /**
  * Mutable runtime configuration. Allows switching CIB7 and Keycloak
@@ -299,6 +300,71 @@ Examples:
       }
 
       return toolResult(result);
+    },
+  );
+
+  // === UPDATE TOOLS ===
+
+  server.tool(
+    "check_for_updates",
+    `Check if a newer version of cib7-mcp is available on GitHub.
+
+Compares the locally installed version against the latest version on the master branch of https://github.com/krixerx/cib7-mcp.
+
+If an update is available, ask the user if they want to upgrade using the self_update tool.`,
+    {},
+    async () => {
+      const result = await checkForUpdates();
+      if (result.error) {
+        return toolResult({
+          updateAvailable: false,
+          currentVersion: result.currentVersion,
+          message: result.error,
+        });
+      }
+      if (result.updateAvailable) {
+        return toolResult({
+          updateAvailable: true,
+          currentVersion: result.currentVersion,
+          latestVersion: result.latestVersion,
+          message: `Update available: ${result.currentVersion} → ${result.latestVersion}. Ask the user if they want to upgrade, then call self_update to apply.`,
+        });
+      }
+      return toolResult({
+        updateAvailable: false,
+        currentVersion: result.currentVersion,
+        latestVersion: result.latestVersion,
+        message: `You are running the latest version (${result.currentVersion}).`,
+      });
+    },
+  );
+
+  server.tool(
+    "self_update",
+    `Update cib7-mcp to the latest version from GitHub.
+
+This will:
+1. Pull the latest code from https://github.com/krixerx/cib7-mcp
+2. Install dependencies (npm install)
+3. Rebuild the project (npm run build)
+
+After a successful update, the MCP server must be restarted for changes to take effect.
+Always ask the user for confirmation before calling this tool.`,
+    {},
+    async () => {
+      const result = await performUpdate();
+      if (result.success) {
+        return toolResult({
+          success: true,
+          previousVersion: result.previousVersion,
+          newVersion: result.newVersion,
+          message: result.message,
+        });
+      }
+      return toolResult({
+        success: false,
+        message: result.message,
+      });
     },
   );
 

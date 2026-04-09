@@ -7,6 +7,7 @@ import { createCib7Client } from "./cib7-client.js";
 import { createRedactor } from "./redaction.js";
 import { createServer, type RuntimeConfig } from "./server.js";
 import { TokenManager } from "./token-manager.js";
+import { startupUpdateCheck } from "./updater.js";
 
 // Node version check
 const [major] = process.versions.node.split(".").map(Number);
@@ -96,6 +97,9 @@ async function main() {
 
   const authMode = staticToken ? "(static token)" : authConfig ? "(Keycloak PKCE auth)" : "(unauthenticated)";
   console.error(`cib7-mcp started. Connected to ${cib7Url} ${authMode}`);
+
+  // Non-blocking update check after server is ready
+  startupUpdateCheck().catch(() => {});
 }
 
 main().catch((err) => {
