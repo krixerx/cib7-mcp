@@ -5,7 +5,7 @@ import { parseAuthConfig, getInstanceId } from "./auth.js";
 import { getRefreshContext } from "./auth-store.js";
 import { createCib7Client } from "./cib7-client.js";
 import { createRedactor } from "./redaction.js";
-import { createServer } from "./server.js";
+import { createServer, type RuntimeConfig } from "./server.js";
 import { TokenManager } from "./token-manager.js";
 
 // Node version check
@@ -45,6 +45,12 @@ async function main() {
     process.exit(1);
   }
 
+  // Mutable runtime config — set_server tool can change these at runtime
+  const runtimeConfig: RuntimeConfig = {
+    cib7Url,
+    authConfig,
+  };
+
   // Token manager (handles in-memory tokens + auto-refresh)
   const tokenManager = new TokenManager(authConfig);
 
@@ -63,7 +69,7 @@ async function main() {
   // Auth provider adapter for the HTTP client
   const authProvider = {
     async getToken(): Promise<string | null> {
-      if (!authConfig) return null;
+      if (!runtimeConfig.authConfig) return null;
       if (!tokenManager.isAuthenticated()) return null;
       try {
         return await tokenManager.getAccessToken();
@@ -76,8 +82,9 @@ async function main() {
     },
   };
 
-  const client = createCib7Client(cib7Url, authProvider, redactor);
-  const server = createServer(client, tokenManager, authConfig);
+  // Client uses a getter so it picks up URL changes from set_server
+  const client = createCib7Client(() => runtimeConfig.cib7Url, authProvider, redactor);
+  const server = createServer(client, tokenManager, runtimeConfig);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

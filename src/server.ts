@@ -4,10 +4,19 @@ import type { Cib7Client } from "./cib7-client.js";
 import { NotFoundError } from "./cib7-client.js";
 import { diagnoseStuckProcess, incidentReport } from "./prompts.js";
 import { performBrowserLogin, getInstanceId } from "./auth.js";
-import { deleteInstance, storeRefreshContext } from "./auth-store.js";
+import { deleteInstance, getRefreshContext, storeRefreshContext } from "./auth-store.js";
 import { ensureAuthenticated } from "./permissions.js";
 import type { TokenManager } from "./token-manager.js";
 import type { AuthConfig, UserSession } from "./types.js";
+
+/**
+ * Mutable runtime configuration. Allows switching CIB7 and Keycloak
+ * targets at runtime via the set_server tool.
+ */
+export interface RuntimeConfig {
+  cib7Url: string;
+  authConfig: AuthConfig | null;
+}
 
 const API_REFERENCE = `# CIB Seven REST API Reference (Supported Endpoints)
 
@@ -93,19 +102,22 @@ function toolResult(data: unknown) {
 export function createServer(
   client: Cib7Client,
   tokenManager: TokenManager,
-  authConfig: AuthConfig | null,
+  runtimeConfig: RuntimeConfig,
 ): McpServer {
   const server = new McpServer({
     name: "cib7-mcp",
     version: "0.1.0",
   });
 
-  const instanceId = authConfig ? getInstanceId(authConfig) : "";
+  // Helper: current instance ID for auth storage
+  function currentInstanceId(): string {
+    return runtimeConfig.authConfig ? getInstanceId(runtimeConfig.authConfig) : "";
+  }
 
   // Helper: ensure auth before tool execution (no-op if unauthenticated mode)
   async function requireAuth(): Promise<void> {
-    if (!authConfig) return; // Unauthenticated mode, skip
-    await ensureAuthenticated(tokenManager, instanceId);
+    if (!runtimeConfig.authConfig) return; // Unauthenticated mode, skip
+    await ensureAuthenticated(tokenManager, currentInstanceId());
   }
 
   // === AUTH TOOLS ===
@@ -117,12 +129,12 @@ export function createServer(
 Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
     {},
     async () => {
-      if (!authConfig) {
-        return toolResult("Authentication is not configured. The server is running in unauthenticated mode. Set KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID to enable authentication.");
+      if (!runtimeConfig.authConfig) {
+        return toolResult("Authentication is not configured. The server is running in unauthenticated mode. Use set_server to configure Keycloak, or set KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID environment variables.");
       }
 
       try {
-        const result = await performBrowserLogin(authConfig, tokenManager);
+        const result = await performBrowserLogin(runtimeConfig.authConfig, tokenManager);
         return toolResult({
           success: true,
           message: `Authenticated as ${result.userEmail}. Session valid for ${result.expiresInMinutes} minutes.`,
@@ -143,11 +155,12 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
     `Check current authentication status. Shows whether you are logged in, your user email, session expiry, and assigned roles.`,
     {},
     async () => {
-      if (!authConfig) {
+      if (!runtimeConfig.authConfig) {
         return toolResult({
           authenticated: true,
           mode: "unauthenticated",
           message: "Server running without authentication. All tools are available.",
+          cib7Url: runtimeConfig.cib7Url,
         });
       }
 
@@ -161,12 +174,18 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
       if (!session.authenticated) {
         return toolResult({
           ...session,
+          cib7Url: runtimeConfig.cib7Url,
+          keycloakUrl: runtimeConfig.authConfig.keycloakUrl,
+          realm: runtimeConfig.authConfig.realm,
           message: "Not authenticated. Call auth_login to sign in.",
         });
       }
 
       return toolResult({
         ...session,
+        cib7Url: runtimeConfig.cib7Url,
+        keycloakUrl: runtimeConfig.authConfig.keycloakUrl,
+        realm: runtimeConfig.authConfig.realm,
         message: `Authenticated as ${session.userEmail}. Session expires in ${session.expiresInMinutes} minutes.`,
       });
     },
@@ -178,10 +197,90 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
     {},
     async () => {
       tokenManager.clearTokens();
-      if (instanceId) {
-        deleteInstance(instanceId);
+      const instId = currentInstanceId();
+      if (instId) {
+        deleteInstance(instId);
       }
       return toolResult({ success: true, message: "Signed out. All tokens cleared." });
+    },
+  );
+
+  // === SERVER CONFIGURATION ===
+
+  server.tool(
+    "set_server",
+    `Switch the CIB Seven and Keycloak target at runtime — no restart needed.
+
+Provide the CIB Seven REST API URL and optionally the Keycloak authentication settings. If Keycloak settings are provided, you will need to call auth_login afterwards to authenticate against the new server.
+
+If Keycloak settings are omitted, the server switches to unauthenticated mode.
+
+Examples:
+- Switch to Benin production: set_server(cib7Url="https://camunda.monentreprise.bj/rest", keycloakUrl="https://login.monentreprise.bj", keycloakRealm="BJ", keycloakClientId="camunda")
+- Switch to local dev: set_server(cib7Url="http://localhost:6009/rest")`,
+    {
+      cib7Url: z.string().describe("CIB Seven REST API URL (e.g., https://camunda.monentreprise.bj/rest)"),
+      keycloakUrl: z.string().optional().describe("Keycloak server URL (e.g., https://login.monentreprise.bj)"),
+      keycloakRealm: z.string().optional().describe("Keycloak realm name (e.g., BJ)"),
+      keycloakClientId: z.string().optional().describe("Keycloak OIDC client ID (e.g., camunda)"),
+    },
+    async ({ cib7Url, keycloakUrl, keycloakRealm, keycloakClientId }) => {
+      // Validate: all-or-nothing for Keycloak settings
+      const hasAny = keycloakUrl || keycloakRealm || keycloakClientId;
+      const hasAll = keycloakUrl && keycloakRealm && keycloakClientId;
+      if (hasAny && !hasAll) {
+        const missing = [];
+        if (!keycloakUrl) missing.push("keycloakUrl");
+        if (!keycloakRealm) missing.push("keycloakRealm");
+        if (!keycloakClientId) missing.push("keycloakClientId");
+        return toolError(
+          `Incomplete Keycloak configuration. Missing: ${missing.join(", ")}. ` +
+          `Provide all three (keycloakUrl, keycloakRealm, keycloakClientId) or none.`
+        );
+      }
+
+      // Build new auth config
+      const newAuthConfig: AuthConfig | null = hasAll
+        ? { keycloakUrl: keycloakUrl!, realm: keycloakRealm!, clientId: keycloakClientId! }
+        : null;
+
+      // Apply changes
+      runtimeConfig.cib7Url = cib7Url;
+      runtimeConfig.authConfig = newAuthConfig;
+      tokenManager.updateAuthConfig(newAuthConfig);
+
+      // Try to restore session from stored refresh token
+      let sessionRestored = false;
+      if (newAuthConfig) {
+        const instId = getInstanceId(newAuthConfig);
+        const storedCtx = getRefreshContext(instId);
+        if (storedCtx) {
+          sessionRestored = await tokenManager.tryStoredRefresh(storedCtx);
+        }
+      }
+
+      const result: Record<string, unknown> = {
+        success: true,
+        cib7Url,
+        mode: newAuthConfig ? "authenticated" : "unauthenticated",
+      };
+
+      if (newAuthConfig) {
+        result.keycloakUrl = newAuthConfig.keycloakUrl;
+        result.realm = newAuthConfig.realm;
+        result.clientId = newAuthConfig.clientId;
+      }
+
+      if (sessionRestored) {
+        result.message = `Switched to ${cib7Url}. Session restored for ${tokenManager.userEmail}.`;
+        result.userEmail = tokenManager.userEmail;
+      } else if (newAuthConfig) {
+        result.message = `Switched to ${cib7Url}. Call auth_login to authenticate against ${newAuthConfig.keycloakUrl}.`;
+      } else {
+        result.message = `Switched to ${cib7Url} (unauthenticated mode). All tools available without login.`;
+      }
+
+      return toolResult(result);
     },
   );
 

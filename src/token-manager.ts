@@ -26,6 +26,17 @@ export class TokenManager {
     this.authConfig = authConfig;
   }
 
+  /**
+   * Switch to a different auth configuration.
+   * Clears all tokens and cached OIDC config so the next login
+   * targets the new Keycloak instance.
+   */
+  updateAuthConfig(authConfig: AuthConfig | null): void {
+    this.clearTokens();
+    this.oidcConfig = null;
+    this.authConfig = authConfig;
+  }
+
   get userEmail(): string | null {
     return this._userEmail;
   }

@@ -26,11 +26,13 @@ export function normalizeBaseUrl(url: string): string {
 }
 
 export function createCib7Client(
-  rawBaseUrl: string,
+  baseUrlSource: string | (() => string),
   authProvider: AuthProvider,
   redactor: (obj: Record<string, unknown>) => Record<string, unknown>
 ): Cib7Client {
-  const baseUrl = normalizeBaseUrl(rawBaseUrl);
+  const getBaseUrl = typeof baseUrlSource === "function"
+    ? () => normalizeBaseUrl(baseUrlSource())
+    : () => normalizeBaseUrl(baseUrlSource);
 
   async function request<T>(
     path: string,
@@ -52,6 +54,7 @@ export function createCib7Client(
       headers["Content-Type"] = "application/json";
     }
 
+    const baseUrl = getBaseUrl();
     let response: Response;
     try {
       response = await fetch(`${baseUrl}${path}`, {
