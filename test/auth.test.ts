@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { parseAuthConfig } from "../src/auth.js";
 
 describe("parseAuthConfig", () => {
@@ -16,7 +16,6 @@ describe("parseAuthConfig", () => {
     delete process.env.KEYCLOAK_URL;
     delete process.env.KEYCLOAK_REALM;
     delete process.env.KEYCLOAK_CLIENT_ID;
-    delete process.env.KEYCLOAK_CLIENT_SECRET;
     expect(parseAuthConfig()).toBeNull();
   });
 
@@ -24,14 +23,12 @@ describe("parseAuthConfig", () => {
     process.env.KEYCLOAK_URL = "https://keycloak.example.com";
     process.env.KEYCLOAK_REALM = "myrealm";
     process.env.KEYCLOAK_CLIENT_ID = "myclient";
-    process.env.KEYCLOAK_CLIENT_SECRET = "mysecret";
 
     const config = parseAuthConfig();
     expect(config).toEqual({
       keycloakUrl: "https://keycloak.example.com",
       realm: "myrealm",
       clientId: "myclient",
-      clientSecret: "mysecret",
     });
   });
 
@@ -39,7 +36,6 @@ describe("parseAuthConfig", () => {
     process.env.KEYCLOAK_URL = "https://keycloak.example.com";
     delete process.env.KEYCLOAK_REALM;
     delete process.env.KEYCLOAK_CLIENT_ID;
-    delete process.env.KEYCLOAK_CLIENT_SECRET;
 
     expect(() => parseAuthConfig()).toThrow("Incomplete Keycloak configuration");
     expect(() => parseAuthConfig()).toThrow("KEYCLOAK_REALM");
@@ -49,7 +45,6 @@ describe("parseAuthConfig", () => {
     process.env.KEYCLOAK_URL = "https://keycloak.example.com";
     delete process.env.KEYCLOAK_REALM;
     delete process.env.KEYCLOAK_CLIENT_ID;
-    process.env.KEYCLOAK_CLIENT_SECRET = "secret";
 
     try {
       parseAuthConfig();
@@ -58,8 +53,19 @@ describe("parseAuthConfig", () => {
       const message = (err as Error).message;
       expect(message).toContain("KEYCLOAK_REALM");
       expect(message).toContain("KEYCLOAK_CLIENT_ID");
-      expect(message).not.toContain("KEYCLOAK_URL");
-      expect(message).not.toContain("KEYCLOAK_CLIENT_SECRET");
+      // KEYCLOAK_URL is set, so it should NOT appear in the "Missing:" list
+      expect(message).not.toContain("Missing: KEYCLOAK_URL");
     }
+  });
+
+  it("does not require KEYCLOAK_CLIENT_SECRET", () => {
+    process.env.KEYCLOAK_URL = "https://keycloak.example.com";
+    process.env.KEYCLOAK_REALM = "myrealm";
+    process.env.KEYCLOAK_CLIENT_ID = "myclient";
+    // No KEYCLOAK_CLIENT_SECRET needed
+
+    const config = parseAuthConfig();
+    expect(config).toBeDefined();
+    expect(config).not.toHaveProperty("clientSecret");
   });
 });

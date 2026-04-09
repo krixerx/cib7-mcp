@@ -92,10 +92,35 @@ export interface AuthConfig {
   keycloakUrl: string;
   realm: string;
   clientId: string;
-  clientSecret: string;
+}
+
+export interface RefreshContext {
+  refreshToken: string;
+  tokenEndpoint: string;
+  clientId: string;
+}
+
+export interface AuthStoreData {
+  version: number;
+  instances: Record<string, AuthStoreInstance>;
+}
+
+export interface AuthStoreInstance {
+  refreshToken?: string;
+  tokenEndpoint?: string;
+  clientId?: string;
+  keycloakUrl?: string;
+  keycloakRealm?: string;
 }
 
 export interface AuthProvider {
   getToken(): Promise<string | null>;
   invalidateToken(): void;
+}
+
+export interface UserSession {
+  authenticated: boolean;
+  userEmail: string | null;
+  roles: string[];
+  expiresInMinutes: number;
 }

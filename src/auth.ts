@@ -1,97 +1,172 @@
+/**
+ * PKCE browser-based authentication flow for Keycloak.
+ *
+ * Uses openid-client v6 for OIDC discovery, PKCE generation,
+ * authorization URL building, and code exchange. No client secret
+ * needed (public client).
+ */
+
+import { exec } from "node:child_process";
 import * as client from "openid-client";
-import type { AuthConfig, AuthProvider } from "./types.js";
+import { storeRefreshContext } from "./auth-store.js";
+import { CallbackServer } from "./callback-server.js";
+import type { TokenManager } from "./token-manager.js";
+import type { AuthConfig } from "./types.js";
 
-export function createAuthProvider(config: AuthConfig | null): AuthProvider {
-  if (!config) {
-    return {
-      getToken: async () => null,
-      invalidateToken: () => {},
-    };
+/**
+ * Perform browser-based PKCE login flow.
+ *
+ * 1. Discover OIDC endpoints from Keycloak
+ * 2. Generate PKCE code_verifier + code_challenge
+ * 3. Open browser to Keycloak login page
+ * 4. Wait for callback with authorization code
+ * 5. Exchange code for tokens
+ * 6. Store tokens in TokenManager + persist refresh context
+ */
+export async function performBrowserLogin(
+  authConfig: AuthConfig,
+  tokenManager: TokenManager,
+): Promise<{ userEmail: string | null; expiresInMinutes: number }> {
+  const issuerUrl = new URL(`/realms/${authConfig.realm}`, authConfig.keycloakUrl);
+
+  // Step 1: OIDC discovery (public client, no secret)
+  let oidcConfig: client.Configuration;
+  try {
+    oidcConfig = await client.discovery(
+      issuerUrl,
+      authConfig.clientId,
+      undefined,
+      client.None(),
+    );
+  } catch (err) {
+    throw new Error(
+      `Cannot reach Keycloak at ${authConfig.keycloakUrl}. ` +
+      `Check KEYCLOAK_URL and network connectivity. ` +
+      `${err instanceof Error ? err.message : ""}`,
+    );
   }
 
-  // Capture non-null config in local constants for closure safety
-  const { keycloakUrl, realm, clientId, clientSecret } = config;
+  // Step 2: Generate PKCE pair and state
+  const codeVerifier = client.randomPKCECodeVerifier();
+  const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
+  const state = client.randomState();
 
-  let cachedToken: string | null = null;
-  let expiresAt = 0;
+  // Step 3: Start callback server and build auth URL
+  const callbackServer = new CallbackServer();
+  const callbackPromise = callbackServer.start(state);
 
-  const issuerUrl = new URL(`/realms/${realm}`, keycloakUrl);
+  // Wait a tick for the server to be listening before reading the port
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
 
-  let discoveryConfig: client.Configuration | null = null;
+  const redirectUri = callbackServer.redirectUri;
 
-  async function ensureDiscovery(): Promise<client.Configuration> {
-    if (!discoveryConfig) {
-      try {
-        discoveryConfig = await client.discovery(
-          issuerUrl,
-          clientId,
-          clientSecret
-        );
-      } catch (err) {
-        throw new Error(
-          `Cannot reach Keycloak at ${keycloakUrl}. Check KEYCLOAK_URL and network connectivity. ${err instanceof Error ? err.message : ""}`
-        );
-      }
-    }
-    return discoveryConfig;
-  }
+  const authUrl = client.buildAuthorizationUrl(oidcConfig, {
+    redirect_uri: redirectUri,
+    scope: "openid email profile",
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    state,
+  });
 
-  async function acquireToken(): Promise<string> {
-    const oidcConfig = await ensureDiscovery();
+  // Step 4: Open browser
+  openBrowser(authUrl.href);
 
-    let tokenSet: client.TokenEndpointResponse;
-    try {
-      tokenSet = await client.clientCredentialsGrant(oidcConfig);
-    } catch (err) {
-      throw new Error(
-        `Keycloak authentication failed. Check KEYCLOAK_CLIENT_ID and KEYCLOAK_CLIENT_SECRET. ${err instanceof Error ? err.message : ""}`
+  try {
+    // Step 5: Wait for callback with auth code
+    const { code } = await callbackPromise;
+
+    // Step 6: Exchange code for tokens
+    // Build a URL that looks like what the callback server received
+    const callbackUrl = new URL(`${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
+
+    const tokenSet = await client.authorizationCodeGrant(
+      oidcConfig,
+      callbackUrl,
+      { pkceCodeVerifier: codeVerifier },
+    );
+
+    // Get the token endpoint from server metadata for refresh
+    const serverMeta = oidcConfig.serverMetadata();
+    const tokenEndpoint = serverMeta.token_endpoint ?? "";
+
+    // Store tokens
+    tokenManager.storeTokens(
+      tokenSet.access_token,
+      tokenSet.refresh_token ?? null,
+      tokenSet.expires_in ?? 300,
+      tokenEndpoint,
+      authConfig.clientId,
+    );
+
+    // Persist refresh context for cross-session auth
+    const refreshCtx = tokenManager.refreshContext;
+    if (refreshCtx) {
+      const instanceId = `${authConfig.keycloakUrl}/${authConfig.realm}`;
+      storeRefreshContext(
+        instanceId,
+        refreshCtx,
+        authConfig.keycloakUrl,
+        authConfig.realm,
       );
     }
 
-    cachedToken = tokenSet.access_token;
-
-    // Refresh at 80% of expiry
-    const expiresIn = tokenSet.expires_in ?? 300;
-    expiresAt = Date.now() + expiresIn * 800; // 80% of expires_in in ms
-
-    return cachedToken;
+    return {
+      userEmail: tokenManager.userEmail,
+      expiresInMinutes: tokenManager.expiresInMinutes,
+    };
+  } catch (err) {
+    callbackServer.stop();
+    throw err;
   }
-
-  return {
-    async getToken(): Promise<string | null> {
-      if (cachedToken && Date.now() < expiresAt) {
-        return cachedToken;
-      }
-      return acquireToken();
-    },
-
-    invalidateToken(): void {
-      cachedToken = null;
-      expiresAt = 0;
-    },
-  };
 }
 
 export function parseAuthConfig(): AuthConfig | null {
   const keycloakUrl = process.env.KEYCLOAK_URL;
   const realm = process.env.KEYCLOAK_REALM;
   const clientId = process.env.KEYCLOAK_CLIENT_ID;
-  const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET;
 
-  if (!keycloakUrl && !realm && !clientId && !clientSecret) {
+  if (!keycloakUrl && !realm && !clientId) {
     return null; // Unauthenticated mode
   }
 
-  if (!keycloakUrl || !realm || !clientId || !clientSecret) {
+  if (!keycloakUrl || !realm || !clientId) {
     const missing = [];
     if (!keycloakUrl) missing.push("KEYCLOAK_URL");
     if (!realm) missing.push("KEYCLOAK_REALM");
     if (!clientId) missing.push("KEYCLOAK_CLIENT_ID");
-    if (!clientSecret) missing.push("KEYCLOAK_CLIENT_SECRET");
     throw new Error(
-      `Incomplete Keycloak configuration. Missing: ${missing.join(", ")}. Either set all KEYCLOAK_* variables or none.`
+      `Incomplete Keycloak configuration. Missing: ${missing.join(", ")}. ` +
+      `Either set all KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_CLIENT_ID or none.`,
     );
   }
 
-  return { keycloakUrl, realm, clientId, clientSecret };
+  return { keycloakUrl, realm, clientId };
+}
+
+/**
+ * Derive an instance ID from the auth config for persistent storage.
+ */
+export function getInstanceId(config: AuthConfig): string {
+  return `${config.keycloakUrl}/${config.realm}`;
+}
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  let cmd: string;
+
+  if (platform === "win32") {
+    cmd = `start "" "${url}"`;
+  } else if (platform === "darwin") {
+    cmd = `open "${url}"`;
+  } else {
+    cmd = `xdg-open "${url}"`;
+  }
+
+  exec(cmd, (err) => {
+    if (err) {
+      // Log to stderr, don't throw. The URL is shown in the tool result anyway.
+      console.error(`Failed to open browser: ${err.message}`);
+      console.error(`Please open this URL manually: ${url}`);
+    }
+  });
 }

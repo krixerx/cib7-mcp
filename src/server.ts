@@ -3,6 +3,11 @@ import { z } from "zod";
 import type { Cib7Client } from "./cib7-client.js";
 import { NotFoundError } from "./cib7-client.js";
 import { diagnoseStuckProcess, incidentReport } from "./prompts.js";
+import { performBrowserLogin, getInstanceId } from "./auth.js";
+import { deleteInstance, storeRefreshContext } from "./auth-store.js";
+import { ensureAuthenticated } from "./permissions.js";
+import type { TokenManager } from "./token-manager.js";
+import type { AuthConfig, UserSession } from "./types.js";
 
 const API_REFERENCE = `# CIB Seven REST API Reference (Supported Endpoints)
 
@@ -85,13 +90,102 @@ function toolResult(data: unknown) {
   };
 }
 
-export function createServer(client: Cib7Client): McpServer {
+export function createServer(
+  client: Cib7Client,
+  tokenManager: TokenManager,
+  authConfig: AuthConfig | null,
+): McpServer {
   const server = new McpServer({
     name: "cib7-mcp",
     version: "0.1.0",
   });
 
-  // === TOOLS ===
+  const instanceId = authConfig ? getInstanceId(authConfig) : "";
+
+  // Helper: ensure auth before tool execution (no-op if unauthenticated mode)
+  async function requireAuth(): Promise<void> {
+    if (!authConfig) return; // Unauthenticated mode, skip
+    await ensureAuthenticated(tokenManager, instanceId);
+  }
+
+  // === AUTH TOOLS ===
+
+  server.tool(
+    "auth_login",
+    `Authenticate with Keycloak via browser-based login. Opens the default browser to the Keycloak login page. After login, the session is stored and persists across server restarts.
+
+Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
+    {},
+    async () => {
+      if (!authConfig) {
+        return toolResult("Authentication is not configured. The server is running in unauthenticated mode. Set KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID to enable authentication.");
+      }
+
+      try {
+        const result = await performBrowserLogin(authConfig, tokenManager);
+        return toolResult({
+          success: true,
+          message: `Authenticated as ${result.userEmail}. Session valid for ${result.expiresInMinutes} minutes.`,
+          userEmail: result.userEmail,
+          sessionExpiresInMinutes: result.expiresInMinutes,
+          roles: tokenManager.roles,
+        });
+      } catch (err) {
+        return toolError(
+          `Authentication failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    },
+  );
+
+  server.tool(
+    "auth_status",
+    `Check current authentication status. Shows whether you are logged in, your user email, session expiry, and assigned roles.`,
+    {},
+    async () => {
+      if (!authConfig) {
+        return toolResult({
+          authenticated: true,
+          mode: "unauthenticated",
+          message: "Server running without authentication. All tools are available.",
+        });
+      }
+
+      const session: UserSession = {
+        authenticated: tokenManager.isAuthenticated() && !tokenManager.isTokenExpired(),
+        userEmail: tokenManager.userEmail,
+        roles: tokenManager.roles,
+        expiresInMinutes: tokenManager.expiresInMinutes,
+      };
+
+      if (!session.authenticated) {
+        return toolResult({
+          ...session,
+          message: "Not authenticated. Call auth_login to sign in.",
+        });
+      }
+
+      return toolResult({
+        ...session,
+        message: `Authenticated as ${session.userEmail}. Session expires in ${session.expiresInMinutes} minutes.`,
+      });
+    },
+  );
+
+  server.tool(
+    "auth_logout",
+    `Sign out and clear all stored credentials. Removes both in-memory tokens and persisted refresh tokens.`,
+    {},
+    async () => {
+      tokenManager.clearTokens();
+      if (instanceId) {
+        deleteInstance(instanceId);
+      }
+      return toolResult({ success: true, message: "Signed out. All tokens cleared." });
+    },
+  );
+
+  // === PROCESS TOOLS ===
 
   server.tool(
     "get_process_instance",
@@ -107,6 +201,7 @@ Key response fields:
     { processInstanceId: z.string().describe("The UUID of the process instance") },
     async ({ processInstanceId }) => {
       try {
+        await requireAuth();
         const result = await client.getProcessInstance(processInstanceId);
         return toolResult(result);
       } catch (err) {
@@ -141,6 +236,7 @@ Filter options:
     },
     async (params) => {
       try {
+        await requireAuth();
         const result = await client.listProcessInstances(params);
         return toolResult(result);
       } catch (err) {
@@ -166,6 +262,7 @@ Use without filters to see all open incidents. Filter by processInstanceId to se
     },
     async (params) => {
       try {
+        await requireAuth();
         const queryParams: Record<string, string> = {};
         if (params.processInstanceId) queryParams.processInstanceId = params.processInstanceId;
         if (params.incidentType) queryParams.incidentType = params.incidentType;
@@ -196,6 +293,7 @@ Key fields:
     },
     async ({ processInstanceId }) => {
       try {
+        await requireAuth();
         const result = await client.getActivityHistory(processInstanceId);
         return toolResult(result);
       } catch (err) {
@@ -219,6 +317,7 @@ Common variable patterns:
     },
     async ({ processInstanceId }) => {
       try {
+        await requireAuth();
         const result = await client.getProcessVariables(processInstanceId);
         return toolResult(result);
       } catch (err) {
@@ -246,6 +345,7 @@ Read the XML to understand:
     },
     async ({ processDefinitionId }) => {
       try {
+        await requireAuth();
         const result = await client.getProcessDefinitionXml(processDefinitionId);
         return toolResult(result.bpmn20Xml);
       } catch (err) {
@@ -273,6 +373,7 @@ Key fields:
     },
     async (params) => {
       try {
+        await requireAuth();
         const queryParams: Record<string, string> = {};
         if (params.processInstanceId) queryParams.processInstanceId = params.processInstanceId;
         if (params.maxResults) queryParams.maxResults = params.maxResults;
