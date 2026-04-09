@@ -122,6 +122,27 @@ export class TokenManager {
     }
   }
 
+  /**
+   * Set a pre-obtained JWT token directly, bypassing the PKCE login flow.
+   * No refresh is possible — once the token expires, re-login or a new token is needed.
+   */
+  setStaticToken(token: string): void {
+    this.accessToken = token;
+    this.refreshToken = null;
+    this.tokenEndpoint = null;
+    this._clientId = null;
+    this._userEmail = this.extractEmail(token);
+    this._roles = this.extractRoles(token);
+
+    // Try to read expiry from the JWT; fall back to 1 hour if missing
+    const claims = this.decodeJwtPayload(token);
+    if (claims?.exp && typeof claims.exp === "number") {
+      this.expiresAt = claims.exp * 1000;
+    } else {
+      this.expiresAt = Date.now() + 3600 * 1000;
+    }
+  }
+
   clearTokens(): void {
     this.accessToken = null;
     this.refreshToken = null;

@@ -54,8 +54,13 @@ async function main() {
   // Token manager (handles in-memory tokens + auto-refresh)
   const tokenManager = new TokenManager(authConfig);
 
-  // Try to restore session from stored refresh token
-  if (authConfig) {
+  // Static token from environment — bypasses Keycloak entirely
+  const staticToken = process.env.CIB7_TOKEN;
+  if (staticToken) {
+    tokenManager.setStaticToken(staticToken);
+    console.error(`Authenticated via CIB7_TOKEN as ${tokenManager.userEmail ?? "unknown user"} (expires in ${tokenManager.expiresInMinutes} min, no auto-refresh)`);
+  } else if (authConfig) {
+    // Try to restore session from stored refresh token
     const instanceId = getInstanceId(authConfig);
     const storedCtx = getRefreshContext(instanceId);
     if (storedCtx) {
@@ -89,9 +94,8 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(
-    `cib7-mcp started. Connected to ${cib7Url}${authConfig ? " (Keycloak PKCE auth)" : " (unauthenticated)"}`,
-  );
+  const authMode = staticToken ? "(static token)" : authConfig ? "(Keycloak PKCE auth)" : "(unauthenticated)";
+  console.error(`cib7-mcp started. Connected to ${cib7Url} ${authMode}`);
 }
 
 main().catch((err) => {

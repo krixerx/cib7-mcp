@@ -124,11 +124,29 @@ export function createServer(
 
   server.tool(
     "auth_login",
-    `Authenticate with Keycloak via browser-based login. Opens the default browser to the Keycloak login page. After login, the session is stored and persists across server restarts.
+    `Authenticate with CIB Seven. Two modes:
+- If a JWT token is provided, it is used directly (no browser login needed).
+- Otherwise, opens the default browser to the Keycloak login page for PKCE authentication.
 
 Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
-    {},
-    async () => {
+    {
+      token: z.string().optional().describe("A pre-obtained JWT access token. When provided, the token is used directly and the browser login flow is skipped."),
+    },
+    async ({ token }) => {
+      // Direct token mode — skip PKCE entirely
+      if (token) {
+        tokenManager.setStaticToken(token);
+        return toolResult({
+          success: true,
+          mode: "static_token",
+          message: `Authenticated as ${tokenManager.userEmail ?? "unknown user"} using provided token. Expires in ${tokenManager.expiresInMinutes} minutes. Note: automatic refresh is not available — provide a new token when this one expires.`,
+          userEmail: tokenManager.userEmail,
+          sessionExpiresInMinutes: tokenManager.expiresInMinutes,
+          roles: tokenManager.roles,
+        });
+      }
+
+      // PKCE browser login
       if (!runtimeConfig.authConfig) {
         return toolResult("Authentication is not configured. The server is running in unauthenticated mode. Use set_server to configure Keycloak, or set KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID environment variables.");
       }
