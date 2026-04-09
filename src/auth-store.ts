@@ -10,14 +10,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AuthStoreData, AuthStoreInstance, RefreshContext } from "./types.js";
 
-const AUTH_DIR = path.join(os.homedir(), ".config", "cib7-mcp");
-const AUTH_FILE = path.join(AUTH_DIR, "auth.json");
 const STORE_VERSION = 1;
+
+function getAuthDir(): string {
+  return process.env.CIB7_AUTH_DIR ?? path.join(os.homedir(), ".config", "cib7-mcp");
+}
+
+function getAuthFile(): string {
+  return path.join(getAuthDir(), "auth.json");
+}
 
 function load(): AuthStoreData {
   try {
-    if (fs.existsSync(AUTH_FILE)) {
-      const raw = fs.readFileSync(AUTH_FILE, "utf-8");
+    const authFile = getAuthFile();
+    if (fs.existsSync(authFile)) {
+      const raw = fs.readFileSync(authFile, "utf-8");
       return JSON.parse(raw) as AuthStoreData;
     }
   } catch {
@@ -27,12 +34,14 @@ function load(): AuthStoreData {
 }
 
 function save(data: AuthStoreData): void {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  const authDir = getAuthDir();
+  const authFile = getAuthFile();
+  fs.mkdirSync(authDir, { recursive: true });
 
   // Atomic write: write to temp file, then rename
-  const tmpFile = AUTH_FILE + ".tmp";
+  const tmpFile = authFile + ".tmp";
   fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.renameSync(tmpFile, AUTH_FILE);
+  fs.renameSync(tmpFile, authFile);
 }
 
 function getInstance(instanceId: string): AuthStoreInstance {

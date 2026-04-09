@@ -5,9 +5,10 @@ Follow these steps in order, calling each tool and analyzing the results before 
 
 1. **Get process instance details**
    Call \`get_process_instance\` with processInstanceId="${processInstanceId}"
-   - Check the current state (ACTIVE, SUSPENDED, etc.)
-   - Note the process definition key and when it started
-   - If the instance is COMPLETED or TERMINATED, report that it is not stuck
+   - Check the \`ended\` flag: if true, the process already completed or was cancelled — report that it is not stuck
+   - Check the \`suspended\` flag: if true, the process was manually paused by an operator
+   - Note the \`definitionId\` for later use with \`get_process_definition_xml\`
+   - Note the \`businessKey\` for context
 
 2. **Trace the execution path**
    Call \`get_activity_history\` with processInstanceId="${processInstanceId}"

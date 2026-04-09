@@ -83,9 +83,6 @@ async function main() {
         return null;
       }
     },
-    invalidateToken(): void {
-      // Don't clear tokens on 401 - let ensureAuthenticated handle refresh
-    },
   };
 
   // Client uses a getter so it picks up URL changes from set_server

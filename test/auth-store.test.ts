@@ -3,28 +3,23 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// We test the auth-store module by temporarily overriding the auth file path.
-// Since the module uses hardcoded paths, we test the logic through the public API
-// and clean up after each test.
-
 const TEST_DIR = path.join(os.tmpdir(), "cib7-mcp-test-" + process.pid);
-const TEST_AUTH_FILE = path.join(TEST_DIR, "auth.json");
 
-// We need to test with the actual module, so we import it
+// Point the auth store at our temp directory before importing
+process.env.CIB7_AUTH_DIR = TEST_DIR;
+
 import { getRefreshContext, storeRefreshContext, deleteInstance } from "../src/auth-store.js";
 
 describe("auth-store", () => {
-  // Note: These tests use the real config path (~/.config/cib7-mcp/auth.json).
-  // We use a unique instance ID to avoid conflicts.
   const testInstanceId = `__test_${process.pid}_${Date.now()}`;
 
+  beforeEach(() => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+  });
+
   afterEach(() => {
-    // Clean up test instance
-    try {
-      deleteInstance(testInstanceId);
-    } catch {
-      // Ignore cleanup errors
-    }
+    // Remove the entire temp directory
+    fs.rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
   it("returns null for unknown instance", () => {

@@ -77,12 +77,53 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
 }
 
 /**
- * Perform the update: git pull, npm install, npm run build.
+ * Check if the package was installed via npm (globally or via npx).
+ */
+function isNpmInstall(): boolean {
+  const projectRoot = getProjectRoot();
+  // npm installs have node_modules/.package-lock.json or live inside a global node_modules
+  // A git clone has .git; an npm install does not and typically lacks src/
+  return !isGitRepo() && !existsSync(resolve(projectRoot, "src"));
+}
+
+/**
+ * Perform the update. Detects the installation method and uses the
+ * appropriate strategy:
+ * - Git clone: git pull + npm install + npm run build
+ * - npm global install: npm update -g cib7-mcp
  * Returns result with instructions to restart.
  */
 export async function performUpdate(): Promise<UpdateResult> {
   const projectRoot = getProjectRoot();
   const previousVersion = getLocalVersion();
+
+  if (isNpmInstall()) {
+    // npm-installed: use npm to update
+    try {
+      console.error("[updater] Updating via npm...");
+      execSync("npm install -g cib7-mcp@latest", { stdio: "pipe", timeout: 120000 });
+
+      const newVersion = getLocalVersion();
+      return {
+        success: true,
+        previousVersion,
+        newVersion,
+        message:
+          `Updated from ${previousVersion} to ${newVersion} via npm. ` +
+          "The MCP server must be restarted for changes to take effect. " +
+          "Please restart the MCP server (close and reopen your AI assistant, or restart the MCP client).",
+      };
+    } catch (err) {
+      return {
+        success: false,
+        previousVersion,
+        newVersion: previousVersion,
+        message:
+          `npm update failed: ${err instanceof Error ? err.message : String(err)}. ` +
+          `You can update manually by running: npm install -g cib7-mcp@latest`,
+      };
+    }
+  }
 
   if (!isGitRepo()) {
     return {
@@ -90,8 +131,9 @@ export async function performUpdate(): Promise<UpdateResult> {
       previousVersion,
       newVersion: previousVersion,
       message:
-        "This installation is not a git repository. Cannot auto-update. " +
-        `Please manually clone from https://github.com/${GITHUB_REPO} and rebuild.`,
+        "Cannot determine installation method. Update manually with one of:\n" +
+        "- npm install -g cib7-mcp@latest (if installed via npm)\n" +
+        `- git clone https://github.com/${GITHUB_REPO} && npm install && npm run build (for development)`,
     };
   }
 

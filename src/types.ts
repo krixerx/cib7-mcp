@@ -115,7 +115,6 @@ export interface AuthStoreInstance {
 
 export interface AuthProvider {
   getToken(): Promise<string | null>;
-  invalidateToken(): void;
 }
 
 export interface UserSession {

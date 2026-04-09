@@ -37,7 +37,6 @@ export function createCib7Client(
   async function request<T>(
     path: string,
     options: RequestInit = {},
-    retry = true
   ): Promise<T> {
     const token = await authProvider.getToken();
 
@@ -68,12 +67,8 @@ export function createCib7Client(
     }
 
     if (response.status === 401 || response.status === 403) {
-      if (retry) {
-        authProvider.invalidateToken();
-        return request<T>(path, options, false);
-      }
       throw new Error(
-        `Authentication failed (${response.status}). Check KEYCLOAK_* environment variables.`
+        `Authentication failed (${response.status}). Call auth_login to re-authenticate.`
       );
     }
 

@@ -341,12 +341,11 @@ If an update is available, ask the user if they want to upgrade using the self_u
 
   server.tool(
     "self_update",
-    `Update cib7-mcp to the latest version from GitHub.
+    `Update cib7-mcp to the latest version.
 
-This will:
-1. Pull the latest code from https://github.com/krixerx/cib7-mcp
-2. Install dependencies (npm install)
-3. Rebuild the project (npm run build)
+Automatically detects the installation method and updates accordingly:
+- npm install: runs npm install -g cib7-mcp@latest
+- Git clone: runs git pull, npm install, and npm run build
 
 After a successful update, the MCP server must be restarted for changes to take effect.
 Always ask the user for confirmation before calling this tool.`,
@@ -372,9 +371,9 @@ Always ask the user for confirmation before calling this tool.`,
 
   server.tool(
     "get_process_instance",
-    `Look up a CIB Seven process instance by its ID. Returns the instance's current state, definition reference, business key, and suspension status.
+    `Look up a CIB Seven process instance by its ID. Returns the instance's definition reference, business key, and status flags.
 
-Use this when you have a specific process instance ID and need to understand its current state. If you only have a business key or definition key, use list_process_instances instead.
+Use this when you have a specific process instance ID and need to check whether it is still running. If you only have a business key or definition key, use list_process_instances instead. For richer details like state, start time, and duration, use list_process_instances which queries the history API.
 
 Key response fields:
 - suspended: true means manually paused by an operator

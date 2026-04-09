@@ -36,7 +36,6 @@ describe("createCib7Client", () => {
     vi.restoreAllMocks();
     mockAuth = {
       getToken: vi.fn().mockResolvedValue("test-token"),
-      invalidateToken: vi.fn(),
     };
     mockRedactor = (obj) => obj;
   });
@@ -63,26 +62,19 @@ describe("createCib7Client", () => {
     expect(capturedHeaders["Accept"]).toBe("application/json");
   });
 
-  it("retries on 401 after invalidating token", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce({
-        ok: false, status: 401, json: async () => ({}), text: async () => "",
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true, status: 200, json: async () => ({ id: "123" }), text: async () => "",
-      } as Response);
+  it("throws on 401 without retrying", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false, status: 401, json: async () => ({}), text: async () => "",
+    } as Response);
 
     const client = createCib7Client("http://localhost:6009/rest", mockAuth, mockRedactor);
-    const result = await client.getProcessInstance("123");
-
-    expect(mockAuth.invalidateToken).toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(result.id).toBe("123");
+    await expect(client.getProcessInstance("123")).rejects.toThrow("Authentication failed");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("throws on second 401", async () => {
+  it("throws on 403", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: false, status: 401, json: async () => ({}), text: async () => "",
+      ok: false, status: 403, json: async () => ({}), text: async () => "",
     } as Response);
 
     const client = createCib7Client("http://localhost:6009/rest", mockAuth, mockRedactor);
