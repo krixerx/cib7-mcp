@@ -11,6 +11,12 @@ import type { TokenManager } from "./token-manager.js";
 import type { AuthConfig, UserSession } from "./types.js";
 import { checkForUpdates, performUpdate, type UpdateCheckResult } from "./updater.js";
 import { registerResources } from "./resources.js";
+import {
+  projectActivityHistory,
+  projectHistoricProcessInstances,
+  projectIncidents,
+  projectJobs,
+} from "./projection.js";
 
 /**
  * Mutable runtime configuration. Allows switching CIB7 and Keycloak
@@ -378,7 +384,7 @@ export function createServer(
 
   server.tool(
     "list_process_instances",
-    `Search historic process instances (covers running + completed via history API). For COUNT questions use count_process_instances instead — same filter surface, no row fetch. See \`cib7://guide/querying\` for filter cookbook, ISO-8601 date format, sort defaults.`,
+    `Search historic process instances (covers running + completed via history API). Returns \`summary\` view by default — the shape hints how to fetch \`full\`. For COUNT questions use count_process_instances instead. See \`cib7://guide/querying\`.`,
     {
       processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
       processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
@@ -398,12 +404,14 @@ export function createServer(
       sortOrder: z.enum(["asc", "desc"]).optional().describe("Sort direction"),
       maxResults: z.number().optional().describe("Max results to return (default 25)"),
       firstResult: z.number().optional().describe("Offset for pagination (default 0)"),
+      view: z.enum(["summary", "full"]).optional().describe('Response shape. "summary" (default) keeps id, processDefinitionId, processDefinitionKey, businessKey, startTime, endTime, state. "full" returns every engine field.'),
     },
     async (params) => {
       try {
         await requireAuth();
-        const result = await client.listProcessInstances(params);
-        return toolResult(result);
+        const { view, ...filters } = params;
+        const rows = await client.listProcessInstances(filters);
+        return toolResult(projectHistoricProcessInstances(rows, view ?? "summary"));
       } catch (err) {
         return toolError(err instanceof Error ? err.message : String(err));
       }
@@ -544,12 +552,13 @@ export function createServer(
 
   server.tool(
     "list_incidents",
-    `List open incidents in the process engine. Filter by processInstanceId or incidentType (\`failedJob\`, \`failedExternalTask\`). Call without filters to see all open incidents. See \`cib7://guide/diagnostics\`.`,
+    `List open incidents in the process engine. Filter by processInstanceId or incidentType (\`failedJob\`, \`failedExternalTask\`). Call without filters to see all. Returns \`summary\` view by default. See \`cib7://guide/diagnostics\`.`,
     {
       processInstanceId: z.string().optional().describe("Filter by process instance ID"),
       incidentType: z.string().optional().describe("Filter by type: failedJob, failedExternalTask"),
       maxResults: z.string().optional().describe("Max results (default 25)"),
       firstResult: z.string().optional().describe("Offset for pagination (default 0)"),
+      view: z.enum(["summary", "full"]).optional().describe('Response shape. "summary" (default) keeps id, processInstanceId, incidentTimestamp, incidentType, activityId, incidentMessage. "full" returns every engine field.'),
     },
     async (params) => {
       try {
@@ -559,8 +568,8 @@ export function createServer(
         if (params.incidentType) queryParams.incidentType = params.incidentType;
         if (params.maxResults) queryParams.maxResults = params.maxResults;
         if (params.firstResult) queryParams.firstResult = params.firstResult;
-        const result = await client.listIncidents(queryParams);
-        return toolResult(result);
+        const rows = await client.listIncidents(queryParams);
+        return toolResult(projectIncidents(rows, params.view ?? "summary"));
       } catch (err) {
         return toolError(err instanceof Error ? err.message : String(err));
       }
@@ -569,15 +578,16 @@ export function createServer(
 
   server.tool(
     "get_activity_history",
-    `Get the execution trace for a process instance — every activity that ran, in order. Activities with a \`startTime\` but no \`endTime\` are where the process is currently waiting. See \`cib7://guide/diagnostics\` for field reference.`,
+    `Get the execution trace for a process instance — every activity that ran, in order. Activities with a \`startTime\` but no \`endTime\` are where the process is currently waiting. Returns \`summary\` view by default. See \`cib7://guide/diagnostics\`.`,
     {
       processInstanceId: z.string().describe("The process instance ID to trace"),
+      view: z.enum(["summary", "full"]).optional().describe('Response shape. "summary" (default) keeps activityId, activityName, activityType, startTime, endTime, durationInMillis, canceled. "full" returns every engine field.'),
     },
-    async ({ processInstanceId }) => {
+    async ({ processInstanceId, view }) => {
       try {
         await requireAuth();
-        const result = await client.getActivityHistory(processInstanceId);
-        return toolResult(result);
+        const rows = await client.getActivityHistory(processInstanceId);
+        return toolResult(projectActivityHistory(rows, view ?? "summary"));
       } catch (err) {
         return toolError(err instanceof Error ? err.message : String(err));
       }
@@ -626,11 +636,12 @@ export function createServer(
 
   server.tool(
     "get_job_details",
-    `Get job execution details. Jobs are units of work the engine executes (service tasks, timers, message events). \`retries=0\` means the engine gave up and an incident was created. See \`cib7://guide/diagnostics\`.`,
+    `Get job execution details. Jobs are units of work the engine executes (service tasks, timers, message events). \`retries=0\` means the engine gave up and an incident was created. Returns \`summary\` view by default. See \`cib7://guide/diagnostics\`.`,
     {
       processInstanceId: z.string().optional().describe("Filter jobs by process instance ID"),
       maxResults: z.string().optional().describe("Max results (default 25)"),
       firstResult: z.string().optional().describe("Offset for pagination (default 0)"),
+      view: z.enum(["summary", "full"]).optional().describe('Response shape. "summary" (default) keeps id, processInstanceId, exceptionMessage, retries, dueDate, suspended, createTime. "full" returns every engine field.'),
     },
     async (params) => {
       try {
@@ -639,8 +650,8 @@ export function createServer(
         if (params.processInstanceId) queryParams.processInstanceId = params.processInstanceId;
         if (params.maxResults) queryParams.maxResults = params.maxResults;
         if (params.firstResult) queryParams.firstResult = params.firstResult;
-        const result = await client.getJobs(queryParams);
-        return toolResult(result);
+        const rows = await client.getJobs(queryParams);
+        return toolResult(projectJobs(rows, params.view ?? "summary"));
       } catch (err) {
         return toolError(err instanceof Error ? err.message : String(err));
       }

@@ -107,6 +107,21 @@ ISO-8601. Either \`2025-03-15\` or \`2025-03-15T00:00:00.000+0000\` work. A plai
 
 ## Stats windows
 Right-open \`[start, nextStart)\`. Week windows advance by 7 days from \`from\` — they are NOT aligned to Monday unless \`from\` is a Monday. Month windows advance by calendar month. \`maxBuckets\` (default 500) guards against runaway queries.
+
+## Response shape: summary vs full
+\`list_process_instances\` (and \`list_incidents\`, \`get_activity_history\`, \`get_job_details\`) return a projected response by default:
+
+\`\`\`json
+{ "view": "summary", "count": 25, "items": [...], "hint": "Re-call with view=\\"full\\" for all fields." }
+\`\`\`
+
+**Default is \`summary\`.** It keeps the fields you need to decide the next action and drops long UUIDs, tenant IDs, and fields that are almost always null. This is typically ~65% smaller than the raw engine shape.
+
+**Call with \`view: "full"\` when:**
+- You need a field that isn't in the summary (e.g., \`processDefinitionId\` to fetch the BPMN XML — check the summary field list first to see what's missing).
+- You're exporting or piping the full engine shape somewhere.
+
+Otherwise leave it on summary.
 `;
 
 const DIAGNOSTICS_GUIDE = `# Diagnosing Process Incidents — Field Reference
