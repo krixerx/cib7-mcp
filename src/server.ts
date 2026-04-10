@@ -10,6 +10,7 @@ import { ensureAuthenticated } from "./permissions.js";
 import type { TokenManager } from "./token-manager.js";
 import type { AuthConfig, UserSession } from "./types.js";
 import { checkForUpdates, performUpdate, type UpdateCheckResult } from "./updater.js";
+import { registerResources } from "./resources.js";
 
 /**
  * Mutable runtime configuration. Allows switching CIB7 and Keycloak
@@ -19,74 +20,6 @@ export interface RuntimeConfig {
   cib7Url: string;
   authConfig: AuthConfig | null;
 }
-
-const API_REFERENCE = `# CIB Seven REST API Reference (Supported Endpoints)
-
-## Process Instances
-- \`GET /process-instance/{id}\` — Get a single process instance by ID
-  - Returns: id, definitionId, businessKey, ended, suspended
-- \`POST /history/process-instance\` — Search historic process instances with JSON body filters
-  - Filters: processDefinitionKey, processDefinitionKeyIn, processDefinitionName, businessKey, active, suspended, completed, startedBy, startedAfter, startedBefore, finishedAfter, finishedBefore, withIncidents, incidentStatus, sortBy, sortOrder
-  - Pagination: maxResults, firstResult query params
-- \`POST /history/process-instance/count\` — Count historic process instances
-  - Same body filters as list; returns {count: N}. Cheap — no row fetch.
-
-## Incidents
-- \`GET /incident\` — List open incidents
-  - Query params: processInstanceId, incidentType, maxResults, firstResult
-  - incidentType values: failedJob, failedExternalTask
-
-## Activity History
-- \`GET /history/activity-instance\` — Get execution trace for a process instance
-  - Query params: processInstanceId, sortBy=startTime, sortOrder=asc
-  - Activities with startTime but no endTime are currently waiting
-
-## Process Variables
-- \`GET /process-instance/{id}/variables\` — Get all variables for a process instance
-  - Returns map of variable name to {value, type, valueInfo}
-  - Sensitive values may be redacted
-
-## Process Definitions
-- \`GET /process-definition/{id}/xml\` — Get BPMN XML for a process definition
-  - Returns: id, bpmn20Xml (diagram elements stripped for readability)
-
-## Jobs
-- \`GET /job\` — List jobs (service task executions)
-  - Query params: processInstanceId, maxResults, firstResult
-  - Key fields: retries (0 = engine stopped retrying), exceptionMessage
-`;
-
-const CONCEPTS = `# CIB Seven Operational Concepts
-
-## Process Instance States
-- **ACTIVE** — Running normally, executing activities
-- **SUSPENDED** — Manually paused by an operator. No activities execute until resumed.
-- **COMPLETED** — All activities finished normally
-- **EXTERNALLY_TERMINATED** — Cancelled by an operator or API call
-
-## Incidents
-An incident records that something went wrong during process execution.
-- **failedJob** — A service task, timer, or other job threw an exception. The engine retried (default 3 times) and gave up. The process is stuck at this activity until the incident is resolved.
-- **failedExternalTask** — An external task worker reported a failure.
-
-## Jobs and Retries
-Jobs are units of work the engine executes (service tasks, timers, etc.).
-- **retries > 0** — Engine will retry the job automatically
-- **retries = 0** — Engine gave up. An incident was created. Manual intervention needed.
-- **exceptionMessage** — The error from the last failed execution attempt
-
-## Activities
-Activities are the steps in a BPMN process (tasks, gateways, events).
-- An activity with \`startTime\` but no \`endTime\` is currently executing or waiting.
-- \`activityType\` values: startEvent, endEvent, userTask, serviceTask, exclusiveGateway, parallelGateway, callActivity, etc.
-
-## Business Key
-A domain-level identifier for a process instance (e.g., order number, case ID). More meaningful than the internal UUID. Set when the process starts.
-
-## Process Definition vs Instance
-- **Definition** — The BPMN model (the blueprint). Has a key, version, and deployment.
-- **Instance** — A running execution of a definition. Has an ID, state, and variables.
-`;
 
 function toolError(message: string) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
@@ -141,12 +74,7 @@ export function createServer(
 
   server.tool(
     "auth_login",
-    `Authenticate with CIB Seven. Three modes:
-- token: a pre-obtained JWT is used directly (no browser login).
-- interactive (default): opens the local browser to the Keycloak login page, waits for the callback, and returns when sign-in completes.
-- headless: starts the login flow, returns the authorizationUrl immediately without opening a browser, and does NOT wait for the callback. Use this on remote/SSH/containerised hosts where no browser is available — share the URL with the user, then call auth_wait to block until they finish signing in.
-
-Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
+    `Authenticate with CIB Seven. Modes: \`token\` (pre-obtained JWT), \`interactive\` (default, opens browser and waits), \`headless\` (returns URL immediately, pair with auth_wait — for remote/SSH/containerised hosts). Call when any other tool returns "Not authenticated". See resource \`cib7://guide/auth\` for details.`,
     {
       token: z.string().optional().describe("A pre-obtained JWT access token. When provided, the token is used directly and the browser login flow is skipped."),
       headless: z.boolean().optional().describe("If true, do not open a local browser and return the authorization URL immediately without waiting for the callback. Pair with auth_wait."),
@@ -223,7 +151,7 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
 
   server.tool(
     "auth_wait",
-    `Block until a headless login started via auth_login(headless=true) completes. Returns once the browser callback has been received and tokens stored, or fails if the login times out or errors.`,
+    `Block until a headless login started via auth_login(headless=true) completes. Fails if the login times out (2 min) or errors.`,
     {},
     async () => {
       if (!pendingHeadlessLogin) {
@@ -251,7 +179,7 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
 
   server.tool(
     "auth_status",
-    `Check current authentication status. Shows whether you are logged in, your user email, session expiry, and assigned roles.`,
+    `Check current authentication status: logged in, user email, session expiry, roles.`,
     {},
     async () => {
       if (!runtimeConfig.authConfig) {
@@ -292,7 +220,7 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
 
   server.tool(
     "auth_logout",
-    `Sign out and clear all stored credentials. Removes both in-memory tokens and persisted refresh tokens.`,
+    `Sign out and clear all stored credentials (in-memory tokens and persisted refresh tokens).`,
     {},
     async () => {
       tokenManager.clearTokens();
@@ -308,15 +236,7 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
 
   server.tool(
     "set_server",
-    `Switch the CIB Seven and Keycloak target at runtime — no restart needed.
-
-Provide the CIB Seven REST API URL and optionally the Keycloak authentication settings. If Keycloak settings are provided, you will need to call auth_login afterwards to authenticate against the new server.
-
-If Keycloak settings are omitted, the server switches to unauthenticated mode.
-
-Examples:
-- Switch to Benin production: set_server(cib7Url="https://camunda.monentreprise.bj/rest", keycloakUrl="https://login.monentreprise.bj", keycloakRealm="BJ", keycloakClientId="camunda")
-- Switch to local dev: set_server(cib7Url="http://localhost:6009/rest")`,
+    `Switch the CIB Seven and Keycloak target at runtime without restart. Provide \`cib7Url\` plus all three Keycloak params for authenticated mode, or none for unauthenticated mode. Partial Keycloak config is rejected. See \`cib7://guide/auth\`.`,
     {
       cib7Url: z.string().describe("CIB Seven REST API URL (e.g., https://camunda.monentreprise.bj/rest)"),
       keycloakUrl: z.string().optional().describe("Keycloak server URL (e.g., https://login.monentreprise.bj)"),
@@ -387,11 +307,7 @@ Examples:
 
   server.tool(
     "check_for_updates",
-    `Check if a newer version of cib7-mcp is available on GitHub.
-
-Compares the locally installed version against the latest version on the master branch of https://github.com/krixerx/cib7-mcp.
-
-If an update is available, ask the user if they want to upgrade using the self_update tool.`,
+    `Check if a newer version of cib7-mcp is available on GitHub. If an update is available, ask the user before calling self_update.`,
     {},
     async () => {
       const result = await checkForUpdates();
@@ -421,14 +337,7 @@ If an update is available, ask the user if they want to upgrade using the self_u
 
   server.tool(
     "self_update",
-    `Update cib7-mcp to the latest version.
-
-Automatically detects the installation method and updates accordingly:
-- npm install: runs npm install -g cib7-mcp@latest
-- Git clone: runs git pull, npm install, and npm run build
-
-After a successful update, the MCP server must be restarted for changes to take effect.
-Always ask the user for confirmation before calling this tool.`,
+    `Update cib7-mcp to the latest version. Auto-detects npm vs git install. Server must be restarted after. **Always confirm with the user before calling this tool.**`,
     {},
     async () => {
       const result = await performUpdate();
@@ -451,15 +360,7 @@ Always ask the user for confirmation before calling this tool.`,
 
   server.tool(
     "get_process_instance",
-    `Look up a running CIB Seven process instance by its ID. Returns the instance's definition reference, business key, and status flags.
-
-**Important:** This queries the runtime database, so it only finds instances that are still active or suspended. Completed or terminated instances return "not found" — use list_process_instances (which queries the history API) to look up finished instances.
-
-Key response fields:
-- suspended: true means manually paused by an operator
-- ended: true means the process completed or was cancelled
-- businessKey: the domain identifier (e.g. order number, case ID)
-- definitionId: use this to fetch the BPMN XML via get_process_definition_xml`,
+    `Look up a running process instance by ID. Runtime-only — completed/terminated instances return "not found"; use list_process_instances for history. See \`cib7://guide/diagnostics\` for response fields.`,
     { processInstanceId: z.string().describe("The UUID of the process instance") },
     async ({ processInstanceId }) => {
       try {
@@ -477,19 +378,7 @@ Key response fields:
 
   server.tool(
     "list_process_instances",
-    `Search for historic process instances using filters. Covers both running and completed instances via the history API.
-
-Common flows:
-- "Find instances of process X" → processDefinitionKey
-- "Find instances started last week" → startedAfter / startedBefore
-- "Find instances by order number" → businessKey
-- "Find instances with incidents" → withIncidents: true
-
-**Dates** use ISO-8601. Either \`2025-03-15\` or \`2025-03-15T00:00:00.000+0000\` work. If you pass a plain date the engine treats it as local midnight.
-
-**Sorting** defaults to engine order. Pass sortBy="startTime" and sortOrder="desc" to get newest-first.
-
-**When you need a COUNT, not rows, use count_process_instances instead** — it's the same filter surface but avoids fetching any records.`,
+    `Search historic process instances (covers running + completed via history API). For COUNT questions use count_process_instances instead — same filter surface, no row fetch. See \`cib7://guide/querying\` for filter cookbook, ISO-8601 date format, sort defaults.`,
     {
       processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
       processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
@@ -523,14 +412,7 @@ Common flows:
 
   server.tool(
     "count_process_instances",
-    `Count historic process instances matching filters. Cheap — returns a number, no row fetch.
-
-Use this to answer "how many?" questions without pagination:
-- "How many processes are running right now?" → active: true
-- "How many instances of X started today?" → processDefinitionKey + startedAfter
-- "How many failed last week?" → withIncidents: true + startedAfter/startedBefore
-
-Takes the same filter surface as list_process_instances. For multi-bucket aggregation (daily/weekly/monthly histogram), use process_instance_stats instead — it batches count calls for you.`,
+    `Count historic process instances matching filters. Cheap — returns a number, no row fetch. Same filter surface as list_process_instances. For day/week/month histograms use process_instance_stats. See \`cib7://guide/querying\`.`,
     {
       processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
       processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
@@ -560,16 +442,7 @@ Takes the same filter surface as list_process_instances. For multi-bucket aggreg
 
   server.tool(
     "process_instance_stats",
-    `Histogram of started process instances over a date range, bucketed by day, week, or month.
-
-Returns per-period counts plus summary stats: total, average, max bucket, min bucket. Internally loops count_process_instances over date windows — cheap compared to listing rows.
-
-Common flows:
-- "Daily starts for the last 30 days" → from=today-30d, to=today, periodUnit=day
-- "Monthly volume for process X this year" → processDefinitionKey + periodUnit=month
-- "What day had the most starts this year?" → periodUnit=day, look at summary.max
-
-Windows are right-open [start, nextStart). Week windows advance by 7 days from \`from\`; they are NOT aligned to Monday unless \`from\` is a Monday. Month windows advance by calendar month.`,
+    `Histogram of started process instances over a date range, bucketed by day/week/month. Returns per-period counts + summary (total, average, max, min bucket). Cheap — loops count_process_instances internally. See \`cib7://guide/querying\` for window semantics (right-open, not Monday-aligned).`,
     {
       from: z.string().describe("Start of range. ISO-8601 date or datetime (e.g. 2025-01-01 or 2025-01-01T00:00:00.000Z)"),
       to: z.string().describe("End of range, exclusive. ISO-8601 date or datetime"),
@@ -671,13 +544,7 @@ Windows are right-open [start, nextStart). Week windows advance by 7 days from \
 
   server.tool(
     "list_incidents",
-    `List open incidents in the process engine. Incidents record things that went wrong during execution.
-
-Key incident types:
-- failedJob: a service task or timer threw an exception and the engine gave up retrying (retries=0)
-- failedExternalTask: an external task worker reported a failure
-
-Use without filters to see all open incidents. Filter by processInstanceId to see incidents for a specific process.`,
+    `List open incidents in the process engine. Filter by processInstanceId or incidentType (\`failedJob\`, \`failedExternalTask\`). Call without filters to see all open incidents. See \`cib7://guide/diagnostics\`.`,
     {
       processInstanceId: z.string().optional().describe("Filter by process instance ID"),
       incidentType: z.string().optional().describe("Filter by type: failedJob, failedExternalTask"),
@@ -702,16 +569,7 @@ Use without filters to see all open incidents. Filter by processInstanceId to se
 
   server.tool(
     "get_activity_history",
-    `Get the execution trace for a process instance — every activity that ran, in order.
-
-This shows you exactly what happened: which tasks executed, in what order, and how long each took. Activities with a startTime but no endTime are currently executing or waiting.
-
-Key fields:
-- activityType: startEvent, serviceTask, userTask, exclusiveGateway, etc.
-- activityName: human-readable name from the BPMN model
-- startTime/endTime: when the activity started and finished
-- durationInMillis: how long it took (null if still running)
-- canceled: true if the activity was interrupted`,
+    `Get the execution trace for a process instance — every activity that ran, in order. Activities with a \`startTime\` but no \`endTime\` are where the process is currently waiting. See \`cib7://guide/diagnostics\` for field reference.`,
     {
       processInstanceId: z.string().describe("The process instance ID to trace"),
     },
@@ -728,14 +586,7 @@ Key fields:
 
   server.tool(
     "get_process_variables",
-    `Get all variables for a process instance. Variables hold the data that drives process execution — form inputs, API responses, decision results.
-
-Sensitive variable values may be redacted (shown as [REDACTED]) based on configured patterns.
-
-Common variable patterns:
-- Error flags or status fields that indicate why a process is waiting
-- Retry counters that show how many times something was attempted
-- Input data from forms or API calls`,
+    `Get all variables for a process instance. Sensitive values may be redacted as \`[REDACTED]\`. See \`cib7://guide/diagnostics\` for what to look for when diagnosing stuck processes.`,
     {
       processInstanceId: z.string().describe("The process instance ID"),
     },
@@ -755,15 +606,7 @@ Common variable patterns:
 
   server.tool(
     "get_process_definition_xml",
-    `Fetch the BPMN XML model for a process definition. This is the blueprint — it shows the expected flow of the process.
-
-Use the definitionId from get_process_instance to fetch the model. The XML includes all activities, gateways, sequence flows, and conditions. Diagram layout elements are stripped for readability.
-
-Read the XML to understand:
-- The expected happy path (sequence of activities)
-- Gateway conditions (what determines which path is taken)
-- Error boundary events (what happens when activities fail)
-- Timer events (scheduled waits or timeouts)`,
+    `Fetch the BPMN XML model for a process definition — the blueprint showing the expected flow. Use the \`definitionId\` from get_process_instance. Diagram layout is stripped. See \`cib7://guide/diagnostics\`.`,
     {
       processDefinitionId: z.string().describe("The process definition ID (from definitionId field of a process instance)"),
     },
@@ -783,13 +626,7 @@ Read the XML to understand:
 
   server.tool(
     "get_job_details",
-    `Get job execution details for a process instance. Jobs are units of work the engine executes — service tasks, timers, message events.
-
-Key fields:
-- retries: how many retry attempts remain. 0 means the engine gave up and created an incident.
-- exceptionMessage: the error from the last failed execution attempt
-- dueDate: when the job is scheduled to execute (for timers)
-- suspended: true if the job is paused`,
+    `Get job execution details. Jobs are units of work the engine executes (service tasks, timers, message events). \`retries=0\` means the engine gave up and an incident was created. See \`cib7://guide/diagnostics\`.`,
     {
       processInstanceId: z.string().optional().describe("Filter jobs by process instance ID"),
       maxResults: z.string().optional().describe("Max results (default 25)"),
@@ -848,35 +685,7 @@ Key fields:
 
   // === RESOURCES ===
 
-  server.resource(
-    "cib7://api-reference",
-    "cib7://api-reference",
-    { mimeType: "text/markdown" },
-    async () => ({
-      contents: [
-        {
-          uri: "cib7://api-reference",
-          text: API_REFERENCE,
-          mimeType: "text/markdown",
-        },
-      ],
-    })
-  );
-
-  server.resource(
-    "cib7://concepts",
-    "cib7://concepts",
-    { mimeType: "text/markdown" },
-    async () => ({
-      contents: [
-        {
-          uri: "cib7://concepts",
-          text: CONCEPTS,
-          mimeType: "text/markdown",
-        },
-      ],
-    })
-  );
+  registerResources(server);
 
   return server;
 }
