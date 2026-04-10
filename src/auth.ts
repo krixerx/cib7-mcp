@@ -13,20 +13,37 @@ import { CallbackServer } from "./callback-server.js";
 import type { TokenManager } from "./token-manager.js";
 import type { AuthConfig } from "./types.js";
 
+export interface BrowserLoginSession {
+  authorizationUrl: string;
+  completion: Promise<{ userEmail: string | null; expiresInMinutes: number }>;
+}
+
+export interface StartBrowserLoginOptions {
+  openBrowser?: boolean;
+}
+
 /**
- * Perform browser-based PKCE login flow.
+ * Start a browser-based PKCE login flow.
+ *
+ * Two-phase so the caller gets the authorization URL synchronously before
+ * the OAuth callback arrives. Useful for headless/remote environments where
+ * the user must open the URL manually.
  *
  * 1. Discover OIDC endpoints from Keycloak
  * 2. Generate PKCE code_verifier + code_challenge
- * 3. Open browser to Keycloak login page
- * 4. Wait for callback with authorization code
- * 5. Exchange code for tokens
- * 6. Store tokens in TokenManager + persist refresh context
+ * 3. Start the callback server and build the auth URL
+ * 4. Optionally open the browser
+ * 5. Return {authorizationUrl, completion} immediately
+ *
+ * The `completion` promise resolves once the callback arrives, the code is
+ * exchanged for tokens, and the refresh context has been persisted.
  */
-export async function performBrowserLogin(
+export async function startBrowserLogin(
   authConfig: AuthConfig,
   tokenManager: TokenManager,
-): Promise<{ userEmail: string | null; expiresInMinutes: number; authorizationUrl: string }> {
+  options: StartBrowserLoginOptions = {},
+): Promise<BrowserLoginSession> {
+  const shouldOpenBrowser = options.openBrowser ?? true;
   const issuerUrl = new URL(`/realms/${authConfig.realm}`, authConfig.keycloakUrl);
 
   // Step 1: OIDC discovery (public client, no secret)
@@ -55,8 +72,15 @@ export async function performBrowserLogin(
   const callbackServer = new CallbackServer();
   const callbackPromise = callbackServer.start(state);
 
-  // Wait for the server to be listening before reading the port
-  await callbackServer.listening;
+  // Wait for the server to be listening (or fail) before reading the port.
+  try {
+    await callbackServer.listening;
+  } catch (err) {
+    // Surface the rejection from callbackPromise so it does not stay
+    // unhandled, then rethrow a clean error to the caller.
+    callbackPromise.catch(() => {});
+    throw err;
+  }
 
   const redirectUri = callbackServer.redirectUri;
 
@@ -70,57 +94,82 @@ export async function performBrowserLogin(
 
   const authorizationUrl = authUrl.href;
 
-  // Step 4: Open browser
-  openBrowser(authorizationUrl);
-
-  try {
-    // Step 5: Wait for callback with auth code
-    const { code } = await callbackPromise;
-
-    // Step 6: Exchange code for tokens
-    // Build a URL that looks like what the callback server received
-    const callbackUrl = new URL(`${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
-
-    const tokenSet = await client.authorizationCodeGrant(
-      oidcConfig,
-      callbackUrl,
-      { pkceCodeVerifier: codeVerifier },
-    );
-
-    // Get the token endpoint from server metadata for refresh
-    const serverMeta = oidcConfig.serverMetadata();
-    const tokenEndpoint = serverMeta.token_endpoint ?? "";
-
-    // Store tokens
-    tokenManager.storeTokens(
-      tokenSet.access_token,
-      tokenSet.refresh_token ?? null,
-      tokenSet.expires_in ?? 300,
-      tokenEndpoint,
-      authConfig.clientId,
-    );
-
-    // Persist refresh context for cross-session auth
-    const refreshCtx = tokenManager.refreshContext;
-    if (refreshCtx) {
-      const instanceId = `${authConfig.keycloakUrl}/${authConfig.realm}`;
-      storeRefreshContext(
-        instanceId,
-        refreshCtx,
-        authConfig.keycloakUrl,
-        authConfig.realm,
-      );
-    }
-
-    return {
-      userEmail: tokenManager.userEmail,
-      expiresInMinutes: tokenManager.expiresInMinutes,
-      authorizationUrl,
-    };
-  } catch (err) {
-    callbackServer.stop();
-    throw err;
+  // Step 4: Open browser (skip in headless mode)
+  if (shouldOpenBrowser) {
+    openBrowser(authorizationUrl);
   }
+
+  // Step 5: Return immediately with a completion promise the caller can await.
+  const completion = (async () => {
+    try {
+      const { code } = await callbackPromise;
+
+      const callbackUrl = new URL(
+        `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+      );
+
+      const tokenSet = await client.authorizationCodeGrant(
+        oidcConfig,
+        callbackUrl,
+        { pkceCodeVerifier: codeVerifier },
+      );
+
+      const serverMeta = oidcConfig.serverMetadata();
+      const tokenEndpoint = serverMeta.token_endpoint ?? "";
+
+      tokenManager.storeTokens(
+        tokenSet.access_token,
+        tokenSet.refresh_token ?? null,
+        tokenSet.expires_in ?? 300,
+        tokenEndpoint,
+        authConfig.clientId,
+      );
+
+      const refreshCtx = tokenManager.refreshContext;
+      if (refreshCtx) {
+        const instanceId = `${authConfig.keycloakUrl}/${authConfig.realm}`;
+        try {
+          storeRefreshContext(
+            instanceId,
+            refreshCtx,
+            authConfig.keycloakUrl,
+            authConfig.realm,
+          );
+        } catch (err) {
+          // Persistence is best-effort: the in-memory session is still valid.
+          console.error(
+            `Failed to persist refresh token: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      return {
+        userEmail: tokenManager.userEmail,
+        expiresInMinutes: tokenManager.expiresInMinutes,
+      };
+    } catch (err) {
+      callbackServer.stop();
+      throw err;
+    }
+  })();
+
+  return { authorizationUrl, completion };
+}
+
+/**
+ * Backwards-compatible wrapper: start the browser login and await completion.
+ */
+export async function performBrowserLogin(
+  authConfig: AuthConfig,
+  tokenManager: TokenManager,
+): Promise<{ userEmail: string | null; expiresInMinutes: number; authorizationUrl: string }> {
+  const session = await startBrowserLogin(authConfig, tokenManager);
+  const result = await session.completion;
+  return {
+    userEmail: result.userEmail,
+    expiresInMinutes: result.expiresInMinutes,
+    authorizationUrl: session.authorizationUrl,
+  };
 }
 
 export function parseAuthConfig(): AuthConfig | null {

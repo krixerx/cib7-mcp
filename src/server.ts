@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { Cib7Client } from "./cib7-client.js";
 import { NotFoundError } from "./cib7-client.js";
 import { diagnoseStuckProcess, incidentReport } from "./prompts.js";
-import { performBrowserLogin, getInstanceId } from "./auth.js";
+import { performBrowserLogin, startBrowserLogin, getInstanceId } from "./auth.js";
+import type { BrowserLoginSession } from "./auth.js";
 import { deleteInstance, getRefreshContext, storeRefreshContext } from "./auth-store.js";
 import { ensureAuthenticated } from "./permissions.js";
 import type { TokenManager } from "./token-manager.js";
@@ -125,6 +126,11 @@ export function createServer(
     return runtimeConfig.authConfig ? getInstanceId(runtimeConfig.authConfig) : "";
   }
 
+  // Holds an in-flight headless login so auth_wait can await it. Only one
+  // headless login is tracked at a time; starting a new one replaces any
+  // prior pending session.
+  let pendingHeadlessLogin: BrowserLoginSession | null = null;
+
   // Helper: ensure auth before tool execution (no-op if unauthenticated mode)
   async function requireAuth(): Promise<void> {
     if (!runtimeConfig.authConfig) return; // Unauthenticated mode, skip
@@ -135,17 +141,17 @@ export function createServer(
 
   server.tool(
     "auth_login",
-    `Authenticate with CIB Seven. Two modes:
-- If a JWT token is provided, it is used directly (no browser login needed).
-- Otherwise, opens the default browser to the Keycloak login page for PKCE authentication.
-
-The response includes the authorizationUrl. If the browser cannot open automatically (headless/remote environments), share this URL with the user so they can complete login manually.
+    `Authenticate with CIB Seven. Three modes:
+- token: a pre-obtained JWT is used directly (no browser login).
+- interactive (default): opens the local browser to the Keycloak login page, waits for the callback, and returns when sign-in completes.
+- headless: starts the login flow, returns the authorizationUrl immediately without opening a browser, and does NOT wait for the callback. Use this on remote/SSH/containerised hosts where no browser is available — share the URL with the user, then call auth_wait to block until they finish signing in.
 
 Call this tool when any other tool returns "Not authenticated. Call auth_login first."`,
     {
       token: z.string().optional().describe("A pre-obtained JWT access token. When provided, the token is used directly and the browser login flow is skipped."),
+      headless: z.boolean().optional().describe("If true, do not open a local browser and return the authorization URL immediately without waiting for the callback. Pair with auth_wait."),
     },
-    async ({ token }) => {
+    async ({ token, headless }) => {
       // Direct token mode — skip PKCE entirely
       if (token) {
         tokenManager.setStaticToken(token);
@@ -164,6 +170,39 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
         return toolResult("Authentication is not configured. The server is running in unauthenticated mode. Use set_server to configure Keycloak, or set KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID environment variables.");
       }
 
+      if (headless) {
+        // Two-phase flow: return URL immediately, leave completion pending.
+        // Tear down any previous pending session first.
+        if (pendingHeadlessLogin) {
+          pendingHeadlessLogin.completion.catch(() => {});
+          pendingHeadlessLogin = null;
+        }
+
+        try {
+          const session = await startBrowserLogin(
+            runtimeConfig.authConfig,
+            tokenManager,
+            { openBrowser: false },
+          );
+
+          pendingHeadlessLogin = session;
+          // Attach a no-op catcher so Node does not log an unhandled
+          // rejection if auth_wait is never called (e.g. user gives up).
+          session.completion.catch(() => {});
+
+          return toolResult({
+            success: true,
+            mode: "headless_pending",
+            message: "Login started. Open the authorizationUrl below in a browser to complete sign-in, then call auth_wait to block until the session is established. Auth will time out after 2 minutes.",
+            authorizationUrl: session.authorizationUrl,
+          });
+        } catch (err) {
+          return toolError(
+            `Failed to start login: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       try {
         const result = await performBrowserLogin(runtimeConfig.authConfig, tokenManager);
         return toolResult({
@@ -175,6 +214,34 @@ Call this tool when any other tool returns "Not authenticated. Call auth_login f
           authorizationUrl: result.authorizationUrl,
         });
       } catch (err) {
+        return toolError(
+          `Authentication failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    },
+  );
+
+  server.tool(
+    "auth_wait",
+    `Block until a headless login started via auth_login(headless=true) completes. Returns once the browser callback has been received and tokens stored, or fails if the login times out or errors.`,
+    {},
+    async () => {
+      if (!pendingHeadlessLogin) {
+        return toolResult("No pending headless login. Call auth_login(headless=true) first to start one.");
+      }
+      const session = pendingHeadlessLogin;
+      try {
+        const result = await session.completion;
+        pendingHeadlessLogin = null;
+        return toolResult({
+          success: true,
+          message: `Authenticated as ${result.userEmail}. Session valid for ${result.expiresInMinutes} minutes.`,
+          userEmail: result.userEmail,
+          sessionExpiresInMinutes: result.expiresInMinutes,
+          roles: tokenManager.roles,
+        });
+      } catch (err) {
+        pendingHeadlessLogin = null;
         return toolError(
           `Authentication failed: ${err instanceof Error ? err.message : String(err)}`,
         );

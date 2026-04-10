@@ -196,15 +196,23 @@ export class TokenManager {
         tokenSet.refresh_token ?? this.refreshToken,
         tokenSet.expires_in ?? 300,
       );
-
-      // Persist rotated refresh token to disk
-      const ctx = this.refreshContext;
-      if (ctx && this._onTokenRefresh) {
-        this._onTokenRefresh(ctx);
-      }
     } catch {
       this.clearTokens();
       throw new Error("Session expired. Please call auth_login again.");
+    }
+
+    // Persist rotated refresh token to disk. Must run outside the try
+    // above: a disk failure here must not invalidate the just-refreshed
+    // in-memory session.
+    const ctx = this.refreshContext;
+    if (ctx && this._onTokenRefresh) {
+      try {
+        this._onTokenRefresh(ctx);
+      } catch (err) {
+        console.error(
+          `Failed to persist rotated refresh token: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 

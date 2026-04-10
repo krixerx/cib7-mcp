@@ -1,5 +1,16 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import * as http from "node:http";
 import { CallbackServer } from "../src/callback-server.js";
+
+vi.mock("node:http", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:http")>();
+  return {
+    ...actual,
+    default: actual,
+    createServer: vi.fn(actual.createServer),
+  };
+});
 
 describe("CallbackServer", () => {
   let server: CallbackServer;
@@ -114,5 +125,41 @@ describe("CallbackServer", () => {
     await expect(
       fetch(`http://127.0.0.1:${port}/callback?code=x&state=some-state`),
     ).rejects.toThrow();
+  });
+
+  it("rejects listening promise when server fails to bind", async () => {
+    // Stub http.createServer to return a fake that emits an error on listen,
+    // simulating EADDRINUSE or similar bind failures.
+    const fake = new EventEmitter() as EventEmitter & {
+      listen: (port: number, host: string, cb: () => void) => void;
+      close: () => void;
+      address: () => null;
+    };
+    fake.listen = (_port: number, _host: string, _cb: () => void) => {
+      // Emit error asynchronously, mirroring real node:http behaviour when
+      // a bind fails — the listen callback never fires.
+      setImmediate(() => fake.emit("error", new Error("EADDRINUSE: simulated bind failure")));
+    };
+    fake.close = () => {};
+    fake.address = () => null;
+
+    const mockedCreateServer = vi.mocked(http.createServer);
+    const originalImpl = mockedCreateServer.getMockImplementation();
+    mockedCreateServer.mockReturnValueOnce(fake as unknown as http.Server);
+
+    try {
+      server = new CallbackServer();
+      const resultPromise = server.start("some-state");
+      // Attach rejection handler early so the failure is observed on both
+      // the outer callback promise and the listening promise.
+      resultPromise.catch(() => {});
+
+      await expect(server.listening).rejects.toThrow("Callback server failed");
+      await expect(resultPromise).rejects.toThrow("Callback server failed");
+    } finally {
+      if (originalImpl) {
+        mockedCreateServer.mockImplementation(originalImpl);
+      }
+    }
   });
 });

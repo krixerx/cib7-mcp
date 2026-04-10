@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TokenManager } from "../src/token-manager.js";
+import * as client from "openid-client";
+
+vi.mock("openid-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openid-client")>();
+  return {
+    ...actual,
+    discovery: vi.fn(),
+    refreshTokenGrant: vi.fn(),
+  };
+});
 
 // A minimal JWT for testing (header.payload.signature)
 // Payload: { "email": "test@example.com", "preferred_username": "testuser",
@@ -137,6 +147,47 @@ describe("TokenManager", () => {
     expect(tm.isAuthenticated()).toBe(true);
     expect(tm.expiresInMinutes).toBeGreaterThan(55);
     expect(tm.expiresInMinutes).toBeLessThanOrEqual(60);
+  });
+
+  it("keeps refreshed session alive when onTokenRefresh callback throws", async () => {
+    const authed = new TokenManager({
+      keycloakUrl: "https://kc.test",
+      realm: "test",
+      clientId: "test-client",
+    });
+
+    // Seed an expired session with a refresh token so refresh() proceeds.
+    const initialJwt = makeTestJwt({ email: "initial@example.com" });
+    authed.storeTokens(initialJwt, "old-refresh", 0, "https://kc.test/token", "test-client");
+
+    // Short-circuit OIDC discovery.
+    const fakeConfig = {} as client.Configuration;
+    vi.mocked(client.discovery).mockResolvedValue(fakeConfig);
+
+    // Return a successful refresh with a rotated refresh token.
+    const newJwt = makeTestJwt({ email: "refreshed@example.com" });
+    vi.mocked(client.refreshTokenGrant).mockResolvedValue({
+      access_token: newJwt,
+      refresh_token: "new-refresh",
+      expires_in: 3600,
+      token_type: "Bearer",
+      expiresIn: () => 3600,
+    } as unknown as Awaited<ReturnType<typeof client.refreshTokenGrant>>);
+
+    // Persistence callback blows up — simulating a disk write failure.
+    authed.onTokenRefresh = () => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+
+    const token = await authed.getAccessToken();
+
+    // The refreshed in-memory session must survive the persist failure.
+    expect(token).toBe(newJwt);
+    expect(authed.isAuthenticated()).toBe(true);
+    expect(authed.userEmail).toBe("refreshed@example.com");
+    expect(authed.expiresInMinutes).toBeGreaterThan(50);
+
+    vi.restoreAllMocks();
   });
 
   it("setStaticToken clears refresh context", () => {

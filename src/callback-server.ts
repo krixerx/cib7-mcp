@@ -21,6 +21,8 @@ export class CallbackServer {
   private _port = 0;
   private _listeningPromise: Promise<void> | null = null;
   private _resolveListening: (() => void) | null = null;
+  private _rejectListening: ((err: Error) => void) | null = null;
+  private _isListening = false;
 
   get port(): number {
     return this._port;
@@ -32,6 +34,7 @@ export class CallbackServer {
 
   /**
    * Resolves once the server is listening and the port is assigned.
+   * Rejects if the server fails to bind.
    */
   get listening(): Promise<void> {
     return this._listeningPromise ?? Promise.reject(new Error("Server not started"));
@@ -42,9 +45,15 @@ export class CallbackServer {
    * Returns a Promise that resolves with the authorization code.
    */
   start(expectedState: string): Promise<CallbackResult> {
-    this._listeningPromise = new Promise<void>((resolve) => {
+    this._listeningPromise = new Promise<void>((resolve, reject) => {
       this._resolveListening = resolve;
+      this._rejectListening = reject;
     });
+    // Attach a no-op rejection handler so that a listening failure does not
+    // crash the process as an unhandled rejection if the caller never awaits
+    // `listening` (e.g. when the outer `start()` promise's error handler
+    // handles it first).
+    this._listeningPromise.catch(() => {});
 
     return new Promise<CallbackResult>((resolve, reject) => {
       const server = http.createServer((req, res) => {
@@ -113,17 +122,25 @@ export class CallbackServer {
           this._port = addr.port;
         }
         this.server = server;
+        this._isListening = true;
         this._resolveListening?.();
       });
 
       server.on("error", (err) => {
+        const failure = new Error(`Callback server failed: ${err.message}`);
+        // If the server never reached listening state, reject the listening
+        // promise so callers awaiting it don't hang forever.
+        if (!this._isListening) {
+          this._rejectListening?.(failure);
+        }
         cleanup();
-        reject(new Error(`Callback server failed: ${err.message}`));
+        reject(failure);
       });
     });
   }
 
   stop(): void {
+    this._isListening = false;
     if (this.server) {
       this.server.close();
       this.server = null;

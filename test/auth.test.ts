@@ -1,5 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { parseAuthConfig } from "../src/auth.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as client from "openid-client";
+import { parseAuthConfig, startBrowserLogin } from "../src/auth.js";
+import { TokenManager } from "../src/token-manager.js";
+
+vi.mock("openid-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openid-client")>();
+  return {
+    ...actual,
+    discovery: vi.fn(),
+    buildAuthorizationUrl: vi.fn(),
+    authorizationCodeGrant: vi.fn(),
+  };
+});
+
+vi.mock("../src/auth-store.js", () => ({
+  storeRefreshContext: vi.fn(),
+}));
 
 describe("parseAuthConfig", () => {
   const originalEnv = process.env;
@@ -67,5 +83,61 @@ describe("parseAuthConfig", () => {
     const config = parseAuthConfig();
     expect(config).toBeDefined();
     expect(config).not.toHaveProperty("clientSecret");
+  });
+});
+
+describe("startBrowserLogin", () => {
+  const authConfig = {
+    keycloakUrl: "https://kc.test",
+    realm: "test",
+    clientId: "test-client",
+  };
+
+  beforeEach(() => {
+    vi.mocked(client.discovery).mockResolvedValue({
+      serverMetadata: () => ({ token_endpoint: "https://kc.test/token" }),
+    } as unknown as client.Configuration);
+    vi.mocked(client.buildAuthorizationUrl).mockReturnValue(
+      new URL("https://kc.test/auth?client_id=test-client&state=abc"),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns authorizationUrl synchronously, before the callback arrives", async () => {
+    const tm = new TokenManager(authConfig);
+
+    const session = await startBrowserLogin(authConfig, tm, { openBrowser: false });
+
+    expect(session.authorizationUrl).toBe(
+      "https://kc.test/auth?client_id=test-client&state=abc",
+    );
+    expect(session.completion).toBeInstanceOf(Promise);
+    expect(tm.isAuthenticated()).toBe(false); // No tokens yet — callback hasn't happened.
+
+    // Do not await completion (it would hang waiting for the 2-minute callback).
+    // Attach a no-op rejection handler and cancel the underlying server by
+    // forcing a rejection via an immediate mock auth grant failure is not
+    // needed — the test process will exit and the callback server will be
+    // GC'd. Attach the handler to prevent unhandled rejection warnings.
+    session.completion.catch(() => {});
+  });
+
+  it("does not open the browser when openBrowser: false", async () => {
+    const tm = new TokenManager(authConfig);
+
+    // If the real browser opener ran, we'd see a process spawn. We can't
+    // easily observe that from here, but we can at least confirm the call
+    // succeeds without throwing and returns promptly.
+    const start = Date.now();
+    const session = await startBrowserLogin(authConfig, tm, { openBrowser: false });
+    const elapsed = Date.now() - start;
+
+    expect(session.authorizationUrl).toContain("https://kc.test/auth");
+    expect(elapsed).toBeLessThan(1000); // Should not block on anything.
+
+    session.completion.catch(() => {});
   });
 });
