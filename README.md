@@ -4,7 +4,7 @@ MCP tool for investigating CIB Seven process instances. Gives Claude comprehensi
 
 ## Features
 
-- **7 investigation tools** — process instances, incidents, activity history, variables, BPMN XML, jobs
+- **Investigation tools** — process instances, counts, daily/weekly/monthly stats, incidents, activity history, variables, BPMN XML, jobs
 - **Semantic descriptions** — Claude understands what each field means operationally, not just raw endpoint data
 - **BPMN introspection** — fetch process definition XML, Claude reasons about expected vs actual execution path
 - **Keycloak auth** — OIDC client credentials flow with automatic token refresh
@@ -80,7 +80,9 @@ If any `KEYCLOAK_*` variable is set, all four must be provided. If none are set,
 | Tool | Description |
 |------|-------------|
 | `get_process_instance` | Look up a process instance by ID — state, definition, business key |
-| `list_process_instances` | Search process instances by definition key, business key, or state |
+| `list_process_instances` | Search process instances by definition, business key, state, start/end date, incident status, with sorting |
+| `count_process_instances` | Count matching instances without fetching rows. Same filter surface as `list_process_instances`. |
+| `process_instance_stats` | Daily / weekly / monthly histogram of started instances. Returns per-period counts + summary (total, average, max, min). |
 | `list_incidents` | List open incidents, optionally filtered by process instance |
 | `get_activity_history` | Execution trace — every activity that ran, in order |
 | `get_process_variables` | All variables for a process instance (with redaction) |

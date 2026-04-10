@@ -130,4 +130,68 @@ describe("createCib7Client", () => {
     const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
   });
+
+  it("countProcessInstances POSTs filters to /history/process-instance/count and returns the count", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ count: 42 }),
+      text: async () => "",
+    } as Response);
+
+    const client = createCib7Client("http://localhost:6009/rest", mockAuth, mockRedactor);
+    const count = await client.countProcessInstances({
+      processDefinitionKey: "orderProcess",
+      startedAfter: "2025-01-01T00:00:00.000Z",
+      startedBefore: "2025-01-02T00:00:00.000Z",
+    });
+
+    expect(count).toBe(42);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://localhost:6009/rest/history/process-instance/count");
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.processDefinitionKey).toBe("orderProcess");
+    expect(body.startedAfter).toBe("2025-01-01T00:00:00.000Z");
+    expect(body.startedBefore).toBe("2025-01-02T00:00:00.000Z");
+    // Count endpoint must not carry pagination fields.
+    expect(body.maxResults).toBeUndefined();
+    expect(body.firstResult).toBeUndefined();
+  });
+
+  it("listProcessInstances passes expanded filters through on the body", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [],
+      text: async () => "",
+    } as Response);
+
+    const client = createCib7Client("http://localhost:6009/rest", mockAuth, mockRedactor);
+    await client.listProcessInstances({
+      processDefinitionKey: "orderProcess",
+      startedAfter: "2025-01-01T00:00:00.000Z",
+      startedBefore: "2025-02-01T00:00:00.000Z",
+      withIncidents: true,
+      sortBy: "startTime",
+      sortOrder: "desc",
+      maxResults: 100,
+      firstResult: 0,
+    });
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    // Pagination stays on the query string, filters go on the body (Camunda quirk).
+    expect(url).toBe(
+      "http://localhost:6009/rest/history/process-instance?maxResults=100&firstResult=0"
+    );
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(body.processDefinitionKey).toBe("orderProcess");
+    expect(body.startedAfter).toBe("2025-01-01T00:00:00.000Z");
+    expect(body.startedBefore).toBe("2025-02-01T00:00:00.000Z");
+    expect(body.withIncidents).toBe(true);
+    expect(body.sortBy).toBe("startTime");
+    expect(body.sortOrder).toBe("desc");
+    expect(body.maxResults).toBeUndefined();
+    expect(body.firstResult).toBeUndefined();
+  });
 });

@@ -25,8 +25,10 @@ const API_REFERENCE = `# CIB Seven REST API Reference (Supported Endpoints)
 - \`GET /process-instance/{id}\` — Get a single process instance by ID
   - Returns: id, definitionId, businessKey, ended, suspended
 - \`POST /history/process-instance\` — Search historic process instances with JSON body filters
-  - Filters: processDefinitionKey, businessKey, active, suspended, completed
+  - Filters: processDefinitionKey, processDefinitionKeyIn, processDefinitionName, businessKey, active, suspended, completed, startedBy, startedAfter, startedBefore, finishedAfter, finishedBefore, withIncidents, incidentStatus, sortBy, sortOrder
   - Pagination: maxResults, firstResult query params
+- \`POST /history/process-instance/count\` — Count historic process instances
+  - Same body filters as list; returns {count: N}. Cheap — no row fetch.
 
 ## Incidents
 - \`GET /incident\` — List open incidents
@@ -98,6 +100,14 @@ function toolResult(data: unknown) {
       },
     ],
   };
+}
+
+function formatPeriodLabel(date: Date, unit: "day" | "week" | "month"): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  if (unit === "month") return `${y}-${m}`;
+  return `${y}-${m}-${d}`;
 }
 
 export function createServer(
@@ -400,22 +410,36 @@ Key response fields:
 
   server.tool(
     "list_process_instances",
-    `Search for process instances using filters. Uses the history API to find both running and completed instances.
+    `Search for historic process instances using filters. Covers both running and completed instances via the history API.
 
-Use this when you need to find process instances by business key, definition key, or state. Returns an array of historic process instances.
+Common flows:
+- "Find instances of process X" → processDefinitionKey
+- "Find instances started last week" → startedAfter / startedBefore
+- "Find instances by order number" → businessKey
+- "Find instances with incidents" → withIncidents: true
 
-Filter options:
-- processDefinitionKey: the BPMN process ID (e.g., "orderProcess")
-- businessKey: domain identifier (e.g., "ORDER-12345")
-- state: ACTIVE, COMPLETED, SUSPENDED, or EXTERNALLY_TERMINATED
-- maxResults: limit results (default 25)
-- firstResult: offset for pagination`,
+**Dates** use ISO-8601. Either \`2025-03-15\` or \`2025-03-15T00:00:00.000+0000\` work. If you pass a plain date the engine treats it as local midnight.
+
+**Sorting** defaults to engine order. Pass sortBy="startTime" and sortOrder="desc" to get newest-first.
+
+**When you need a COUNT, not rows, use count_process_instances instead** — it's the same filter surface but avoids fetching any records.`,
     {
       processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
+      processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
+      processDefinitionName: z.string().optional().describe("Filter by definition display name"),
       businessKey: z.string().optional().describe("Filter by business key"),
+      startedBy: z.string().optional().describe("User ID that started the process"),
       active: z.boolean().optional().describe("Only active (running) instances"),
       suspended: z.boolean().optional().describe("Only suspended instances"),
       completed: z.boolean().optional().describe("Only completed instances"),
+      startedAfter: z.string().optional().describe("Only instances started after this ISO-8601 datetime (e.g. 2025-03-01 or 2025-03-01T00:00:00.000+0000)"),
+      startedBefore: z.string().optional().describe("Only instances started before this ISO-8601 datetime"),
+      finishedAfter: z.string().optional().describe("Only instances finished after this ISO-8601 datetime"),
+      finishedBefore: z.string().optional().describe("Only instances finished before this ISO-8601 datetime"),
+      withIncidents: z.boolean().optional().describe("Only instances that currently have incidents"),
+      incidentStatus: z.enum(["open", "resolved"]).optional().describe("Filter by incident status"),
+      sortBy: z.enum(["instanceId", "definitionId", "definitionKey", "definitionName", "definitionVersion", "businessKey", "startTime", "endTime", "duration", "tenantId"]).optional().describe("Field to sort by"),
+      sortOrder: z.enum(["asc", "desc"]).optional().describe("Sort direction"),
       maxResults: z.number().optional().describe("Max results to return (default 25)"),
       firstResult: z.number().optional().describe("Offset for pagination (default 0)"),
     },
@@ -424,6 +448,154 @@ Filter options:
         await requireAuth();
         const result = await client.listProcessInstances(params);
         return toolResult(result);
+      } catch (err) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
+
+  server.tool(
+    "count_process_instances",
+    `Count historic process instances matching filters. Cheap — returns a number, no row fetch.
+
+Use this to answer "how many?" questions without pagination:
+- "How many processes are running right now?" → active: true
+- "How many instances of X started today?" → processDefinitionKey + startedAfter
+- "How many failed last week?" → withIncidents: true + startedAfter/startedBefore
+
+Takes the same filter surface as list_process_instances. For multi-bucket aggregation (daily/weekly/monthly histogram), use process_instance_stats instead — it batches count calls for you.`,
+    {
+      processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
+      processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
+      processDefinitionName: z.string().optional().describe("Filter by definition display name"),
+      businessKey: z.string().optional().describe("Filter by business key"),
+      startedBy: z.string().optional().describe("User ID that started the process"),
+      active: z.boolean().optional().describe("Only active (running) instances"),
+      suspended: z.boolean().optional().describe("Only suspended instances"),
+      completed: z.boolean().optional().describe("Only completed instances"),
+      startedAfter: z.string().optional().describe("Only instances started after this ISO-8601 datetime"),
+      startedBefore: z.string().optional().describe("Only instances started before this ISO-8601 datetime"),
+      finishedAfter: z.string().optional().describe("Only instances finished after this ISO-8601 datetime"),
+      finishedBefore: z.string().optional().describe("Only instances finished before this ISO-8601 datetime"),
+      withIncidents: z.boolean().optional().describe("Only instances that currently have incidents"),
+      incidentStatus: z.enum(["open", "resolved"]).optional().describe("Filter by incident status"),
+    },
+    async (params) => {
+      try {
+        await requireAuth();
+        const count = await client.countProcessInstances(params);
+        return toolResult({ count });
+      } catch (err) {
+        return toolError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
+
+  server.tool(
+    "process_instance_stats",
+    `Histogram of started process instances over a date range, bucketed by day, week, or month.
+
+Returns per-period counts plus summary stats: total, average, max bucket, min bucket. Internally loops count_process_instances over date windows — cheap compared to listing rows.
+
+Common flows:
+- "Daily starts for the last 30 days" → from=today-30d, to=today, periodUnit=day
+- "Monthly volume for process X this year" → processDefinitionKey + periodUnit=month
+- "What day had the most starts this year?" → periodUnit=day, look at summary.max
+
+Windows are right-open [start, nextStart). Week windows advance by 7 days from \`from\`; they are NOT aligned to Monday unless \`from\` is a Monday. Month windows advance by calendar month.`,
+    {
+      from: z.string().describe("Start of range. ISO-8601 date or datetime (e.g. 2025-01-01 or 2025-01-01T00:00:00.000Z)"),
+      to: z.string().describe("End of range, exclusive. ISO-8601 date or datetime"),
+      periodUnit: z.enum(["day", "week", "month"]).describe("Bucket size"),
+      processDefinitionKey: z.string().optional().describe("Filter by BPMN process definition key"),
+      processDefinitionKeyIn: z.array(z.string()).optional().describe("Filter to multiple definition keys"),
+      active: z.boolean().optional().describe("Only count active instances"),
+      completed: z.boolean().optional().describe("Only count completed instances"),
+      withIncidents: z.boolean().optional().describe("Only count instances with incidents"),
+      maxBuckets: z.number().optional().describe("Safety cap on number of buckets (default 500). Prevents runaway queries."),
+    },
+    async (params) => {
+      try {
+        await requireAuth();
+        const fromDate = new Date(params.from);
+        const toDate = new Date(params.to);
+        if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+          return toolError("Invalid from/to date. Use ISO-8601 (e.g. 2025-01-01 or 2025-01-01T00:00:00.000Z).");
+        }
+        if (fromDate >= toDate) {
+          return toolError("'from' must be strictly before 'to'.");
+        }
+
+        const buckets: Array<{ start: Date; end: Date }> = [];
+        const maxBuckets = params.maxBuckets ?? 500;
+        let cursor = new Date(fromDate);
+        while (cursor < toDate) {
+          const next = new Date(cursor);
+          if (params.periodUnit === "day") {
+            next.setUTCDate(next.getUTCDate() + 1);
+          } else if (params.periodUnit === "week") {
+            next.setUTCDate(next.getUTCDate() + 7);
+          } else {
+            next.setUTCMonth(next.getUTCMonth() + 1);
+          }
+          const end = next > toDate ? new Date(toDate) : new Date(next);
+          buckets.push({ start: new Date(cursor), end });
+          cursor = next;
+          if (buckets.length > maxBuckets) {
+            return toolError(
+              `Range produces more than ${maxBuckets} buckets. Narrow the range, use a coarser periodUnit, or raise maxBuckets.`
+            );
+          }
+        }
+
+        const baseFilter: Record<string, unknown> = {};
+        if (params.processDefinitionKey) baseFilter.processDefinitionKey = params.processDefinitionKey;
+        if (params.processDefinitionKeyIn) baseFilter.processDefinitionKeyIn = params.processDefinitionKeyIn;
+        if (params.active !== undefined) baseFilter.active = params.active;
+        if (params.completed !== undefined) baseFilter.completed = params.completed;
+        if (params.withIncidents !== undefined) baseFilter.withIncidents = params.withIncidents;
+
+        const concurrency = 8;
+        const results: Array<{ period: string; start: string; end: string; count: number }> = new Array(buckets.length);
+        let index = 0;
+        async function worker(): Promise<void> {
+          while (true) {
+            const i = index++;
+            if (i >= buckets.length) return;
+            const b = buckets[i];
+            const count = await client.countProcessInstances({
+              ...baseFilter,
+              startedAfter: b.start.toISOString(),
+              startedBefore: b.end.toISOString(),
+            });
+            results[i] = {
+              period: formatPeriodLabel(b.start, params.periodUnit),
+              start: b.start.toISOString(),
+              end: b.end.toISOString(),
+              count,
+            };
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(concurrency, buckets.length) }, () => worker()));
+
+        const counts = results.map((r) => r.count);
+        const total = counts.reduce((a, b) => a + b, 0);
+        const maxIdx = counts.indexOf(Math.max(...counts));
+        const minIdx = counts.indexOf(Math.min(...counts));
+
+        return toolResult({
+          from: fromDate.toISOString(),
+          to: toDate.toISOString(),
+          periodUnit: params.periodUnit,
+          bucketCount: results.length,
+          summary: {
+            total,
+            average: results.length > 0 ? Math.round((total / results.length) * 100) / 100 : 0,
+            max: results.length > 0 ? { period: results[maxIdx].period, count: counts[maxIdx] } : null,
+            min: results.length > 0 ? { period: results[minIdx].period, count: counts[minIdx] } : null,
+          },
+          periods: results,
+        });
       } catch (err) {
         return toolError(err instanceof Error ? err.message : String(err));
       }

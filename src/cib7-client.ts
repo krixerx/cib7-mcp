@@ -13,6 +13,7 @@ import type {
 export interface Cib7Client {
   getProcessInstance(id: string): Promise<ProcessInstance>;
   listProcessInstances(filters: Record<string, unknown>): Promise<HistoricProcessInstance[]>;
+  countProcessInstances(filters: Record<string, unknown>): Promise<number>;
   listIncidents(params: Record<string, string>): Promise<Incident[]>;
   getActivityHistory(processInstanceId: string): Promise<HistoricActivityInstance[]>;
   getProcessVariables(processInstanceId: string): Promise<ProcessVariables>;
@@ -156,6 +157,17 @@ export function createCib7Client(
           body: JSON.stringify(queryBody),
         }
       );
+    },
+
+    async countProcessInstances(filters: Record<string, unknown>): Promise<number> {
+      const result = await request<{ count: number }>(
+        `/history/process-instance/count`,
+        {
+          method: "POST",
+          body: JSON.stringify(filters),
+        }
+      );
+      return result.count;
     },
 
     async listIncidents(params: Record<string, string>): Promise<Incident[]> {
