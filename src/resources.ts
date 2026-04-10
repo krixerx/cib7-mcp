@@ -109,17 +109,19 @@ ISO-8601. Either \`2025-03-15\` or \`2025-03-15T00:00:00.000+0000\` work. A plai
 Right-open \`[start, nextStart)\`. Week windows advance by 7 days from \`from\` — they are NOT aligned to Monday unless \`from\` is a Monday. Month windows advance by calendar month. \`maxBuckets\` (default 500) guards against runaway queries.
 
 ## Response shape: summary vs full
-\`list_process_instances\` (and \`list_incidents\`, \`get_activity_history\`, \`get_job_details\`) return a projected response by default:
+\`list_process_instances\` (and \`list_incidents\`, \`get_activity_history\`, \`get_job_details\`) all accept a \`view\` param. The top-level response is always a bare array of rows — only the per-row fields change.
 
-\`\`\`json
-{ "view": "summary", "count": 25, "items": [...], "hint": "Re-call with view=\\"full\\" for all fields." }
-\`\`\`
+**Default is \`view: "summary"\`.** It keeps the fields you need to decide the next action and drops long UUIDs, tenant IDs, and fields that are almost always null. Roughly 40–60% smaller than the raw engine shape, tool-dependent.
 
-**Default is \`summary\`.** It keeps the fields you need to decide the next action and drops long UUIDs, tenant IDs, and fields that are almost always null. This is typically ~65% smaller than the raw engine shape.
+Per-tool summary field sets:
+- \`list_process_instances\` → id, processDefinitionId, processDefinitionKey, businessKey, startTime, endTime, state
+- \`get_activity_history\` → activityId, activityName, activityType, startTime, endTime, durationInMillis, canceled
+- \`list_incidents\` → id, processInstanceId, incidentTimestamp, incidentType, activityId, incidentMessage
+- \`get_job_details\` → id, processInstanceId, exceptionMessage, retries, dueDate, suspended, createTime
 
 **Call with \`view: "full"\` when:**
-- You need a field that isn't in the summary (e.g., \`processDefinitionId\` to fetch the BPMN XML — check the summary field list first to see what's missing).
-- You're exporting or piping the full engine shape somewhere.
+- You need a field not listed above — e.g., \`processDefinitionName\`, \`durationInMillis\`, or \`startUserId\` from a historic instance; \`assignee\` or \`executionId\` from an activity; \`causeIncidentId\` from an incident.
+- You're exporting or piping the raw engine shape.
 
 Otherwise leave it on summary.
 `;

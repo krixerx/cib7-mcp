@@ -13,20 +13,13 @@ import type {
  * only the fields a caller needs to decide the next action; "full" preserves
  * the raw engine shape for drill-down.
  *
- * Default is "summary". When a summary response is returned, `hint` tells
- * the model that more fields are available via view="full".
+ * The top-level response shape is always a bare array — same as before the
+ * projection feature — so existing downstream consumers keep working. Callers
+ * discover the summary shape by reading the keys on each row; the tool
+ * description advertises the view="full" escape hatch.
  */
 
 export type View = "summary" | "full";
-
-export interface ProjectedResponse<T> {
-  view: View;
-  count: number;
-  items: T[];
-  hint?: string;
-}
-
-const SUMMARY_HINT = 'Summary view. Re-call with view="full" for all fields.';
 
 // ---- HistoricProcessInstance --------------------------------------------
 
@@ -57,16 +50,9 @@ function summarizeHistoricProcessInstance(
 export function projectHistoricProcessInstances(
   rows: HistoricProcessInstance[],
   view: View,
-): ProjectedResponse<HistoricProcessInstance | HistoricProcessInstanceSummary> {
-  if (view === "full") {
-    return { view, count: rows.length, items: rows };
-  }
-  return {
-    view: "summary",
-    count: rows.length,
-    items: rows.map(summarizeHistoricProcessInstance),
-    hint: SUMMARY_HINT,
-  };
+): HistoricProcessInstance[] | HistoricProcessInstanceSummary[] {
+  if (view === "full") return rows;
+  return rows.map(summarizeHistoricProcessInstance);
 }
 
 // ---- HistoricActivityInstance -------------------------------------------
@@ -98,16 +84,9 @@ function summarizeHistoricActivityInstance(
 export function projectActivityHistory(
   rows: HistoricActivityInstance[],
   view: View,
-): ProjectedResponse<HistoricActivityInstance | HistoricActivityInstanceSummary> {
-  if (view === "full") {
-    return { view, count: rows.length, items: rows };
-  }
-  return {
-    view: "summary",
-    count: rows.length,
-    items: rows.map(summarizeHistoricActivityInstance),
-    hint: SUMMARY_HINT,
-  };
+): HistoricActivityInstance[] | HistoricActivityInstanceSummary[] {
+  if (view === "full") return rows;
+  return rows.map(summarizeHistoricActivityInstance);
 }
 
 // ---- Incident -----------------------------------------------------------
@@ -135,16 +114,9 @@ function summarizeIncident(r: Incident): IncidentSummary {
 export function projectIncidents(
   rows: Incident[],
   view: View,
-): ProjectedResponse<Incident | IncidentSummary> {
-  if (view === "full") {
-    return { view, count: rows.length, items: rows };
-  }
-  return {
-    view: "summary",
-    count: rows.length,
-    items: rows.map(summarizeIncident),
-    hint: SUMMARY_HINT,
-  };
+): Incident[] | IncidentSummary[] {
+  if (view === "full") return rows;
+  return rows.map(summarizeIncident);
 }
 
 // ---- Job ---------------------------------------------------------------
@@ -174,14 +146,7 @@ function summarizeJob(r: Job): JobSummary {
 export function projectJobs(
   rows: Job[],
   view: View,
-): ProjectedResponse<Job | JobSummary> {
-  if (view === "full") {
-    return { view, count: rows.length, items: rows };
-  }
-  return {
-    view: "summary",
-    count: rows.length,
-    items: rows.map(summarizeJob),
-    hint: SUMMARY_HINT,
-  };
+): Job[] | JobSummary[] {
+  if (view === "full") return rows;
+  return rows.map(summarizeJob);
 }

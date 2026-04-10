@@ -89,6 +89,24 @@ If any `KEYCLOAK_*` variable is set, all four must be provided. If none are set,
 | `get_process_definition_xml` | BPMN XML model (diagram elements stripped for readability) |
 | `get_job_details` | Job execution details — retries, exception messages |
 
+### Response views
+
+Four of the list-shaped tools accept a `view` parameter to control which
+per-row fields are returned. The top-level response is always a bare array of
+rows — only the field set per row changes.
+
+| Tool | Summary fields (default) |
+|------|--------------------------|
+| `list_process_instances` | `id`, `processDefinitionId`, `processDefinitionKey`, `businessKey`, `startTime`, `endTime`, `state` |
+| `get_activity_history` | `activityId`, `activityName`, `activityType`, `startTime`, `endTime`, `durationInMillis`, `canceled` |
+| `list_incidents` | `id`, `processInstanceId`, `incidentTimestamp`, `incidentType`, `activityId`, `incidentMessage` |
+| `get_job_details` | `id`, `processInstanceId`, `exceptionMessage`, `retries`, `dueDate`, `suspended`, `createTime` |
+
+`view: "summary"` is the default and typically drops 40–60% of the response
+size compared to the raw engine shape. Pass `view: "full"` when you need a
+field that isn't in the summary list above (e.g., `processDefinitionName`,
+`startUserId`, `executionId`, `causeIncidentId`, `jobDefinitionId`, tenant IDs).
+
 ## Prompts
 
 | Prompt | Description |
