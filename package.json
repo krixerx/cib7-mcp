@@ -1,6 +1,6 @@
 {
   "name": "cib7-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP tool for investigating CIB Seven process instances — gives Claude comprehensive knowledge of CIB Seven REST APIs with live execution and Keycloak auth",
   "type": "module",
   "main": "dist/index.js",
